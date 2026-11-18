@@ -1,0 +1,19 @@
+# Bundle patch layer for dsh-omni-article-markdown.
+#
+# The row loads this package's main entry (a plain Cordis plugin) into the host:
+# it registers the `md_article` native tool. The plugin ships no skill; the
+# tool declaration already carries the capability and its usage.
+#
+# Every config key has a default and can be omitted. Override values in the
+# profile's own patch file (`~/.dsh/profiles/web/cordis.patch.yml`) with a row
+# that targets `id: omni-article-markdown` and lists ONLY the keys to change:
+#
+#   - id: omni-article-markdown
+#     config:
+#       allowInstall: false
+#
+# Do not restate the whole config there: the config object is replaced, not
+# merged, so a partial row silently resets the other keys to their defaults.
+- insert:
+    - id: omni-article-markdown
+      name: dsh-omni-article-markdown
