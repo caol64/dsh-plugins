@@ -7,5 +7,8 @@ node_modules/
 # stray local pnpm store: pnpm creates one when a directory has no pnpm-workspace.yaml
 .pnpm-store/
 
+# local tarballs from `pnpm run pack:tarball` (releases are built in CI)
+.dist/
+
 # OS noise
 .DS_Store

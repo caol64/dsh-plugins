@@ -20,6 +20,7 @@ src/targets.mjs        路径推导与安全守卫（纯函数 + 一次 realpath
 src/errors.mjs         稳定错误码 DeleteFailure
 src/i18n.mjs           Host 侧中英文案（日志与路由响应）
 scripts/dev.sh         薄壳：转给仓库根 ../scripts/dev.sh
+pnpm-lock.yaml         CI 必需（setup-node 的 pnpm 缓存与 --frozen-lockfile 都依赖它）
 docs/DEVELOPMENT-LOG.md 设计决策与踩坑（改设计前先读）
 locale/{zh,en}.json    Plugin Manager 展示元数据
 icon.svg               原创图标
@@ -66,7 +67,15 @@ pnpm run clean            # 停掉隔离进程并删除 .dev/
 
 隔离真机验证的完整流程（超出 `check` 的部分）：起 `dsh web --no-open --port 0` → 用 token 换 cookie → `session/create` + `session/prompt` 让日志落盘 → `POST /api/dsh-session-delete/delete` → 断言目录、缓存、`session/list` 全部消失。**自测期间绝不对 `~/.dsh` 的真实会话执行删除。**
 
-## 5. 改动后同步
+## 5. 发布
+
+`.github/workflows/release.yml` 发现所有声明了 `dsh.bundle` 的目录，逐个 `pnpm install --frozen-lockfile` → `pnpm test` → `pnpm pack` → 挂到 `v<version>` Release。
+
+- **改了 `devDependencies` 必须重新提交 `pnpm-lock.yaml`**（`pnpm install` 后提交），否则 CI 的 `--frozen-lockfile` 会失败。
+- 发新版本：改 `package.json` 的 `version`，重跑 workflow；同一版本重跑是幂等的（只替换 asset）。
+- 本地 `pnpm run pack:tarball` 产物在 `.dist/`，已被 `.gitignore` 忽略。
+
+## 6. 改动后同步
 
 - 配置键、错误码或对外行为变化 → 同步 `README.md`、`cordis.patch.yml` 注释、`docs/DEVELOPMENT-LOG.md`。
 - 新增运行时文件 → 同步 `package.json` 的 `files` 与 `test/manifest.test.mjs`（测试守护运行期文件存在）。

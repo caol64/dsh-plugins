@@ -143,3 +143,5 @@ exec bash "$PLUGIN_DIR/../scripts/dev.sh" "$PLUGIN_DIR" "${args[@]}"
 | `scripts/` | 仓库级共享自测脚本（`dev.sh`），被每个插件的薄壳调用 | — |
 
 新增插件时，请在上表登记，并在插件目录内提供自己的 `AGENTS.md`（写项目独有的目录结构、脚本入口、领域约束），通用规则不要复制过去。
+
+**新插件目录必须带上 `pnpm-lock.yaml`**（在插件目录里跑一次 `pnpm install` 生成并提交）。`.github/workflows/release.yml` 按 `${{ matrix.plugin.dir }}/pnpm-lock.yaml` 打开 `actions/setup-node` 的 pnpm 缓存，文件不存在时 workflow 直接在 setup 步骤失败（`Some specified paths were not resolved, unable to cache dependencies`），且 CI 用 `pnpm install --frozen-lockfile` 安装，没有 lockfile 也过不去。
