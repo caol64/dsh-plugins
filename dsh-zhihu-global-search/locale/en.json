@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Zhihu global search",
+    "description": "Searches the whole web through the Zhihu Open Platform, with an Access Secret stored from the settings page."
+  }
+}

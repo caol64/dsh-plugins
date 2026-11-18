@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Delete session",
+    "description": "Adds \"Delete session\" at the bottom of the sidebar session menu, then removes that session's log, projection cache and workspace accounting from disk and drops the row from the session list."
+  }
+}

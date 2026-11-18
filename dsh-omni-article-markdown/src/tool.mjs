@@ -2,9 +2,12 @@
  * Model-facing declaration for the `md_article` tool: description text,
  * parameter spec, and output schema.
  *
- * The parameter spec follows `defineTool`'s authoring DSL (a property map whose
- * keys carry `required: true`); `defineTool` compiles it into the wire JSON
- * Schema. The output schema is the enforced JSON Schema subset.
+ * Both halves use `defineTool`'s VALUE SCHEMA DSL, not raw JSON Schema: the
+ * parameter map marks required keys with `required: true` (compiled into the
+ * parent's `required` array), and the output schema uses the same node keywords
+ * — a root `required` array is rejected there too, and an `object` node must
+ * state `additionalProperties`. A DSL mistake throws `JsonSchemaError` during
+ * `apply()`, which fails activation and leaves the tool unregistered.
  */
 import { TRUNCATE_MIN_VERSION } from "./env.mjs";
 
@@ -73,11 +76,9 @@ export const OUTPUT_SCHEMA = {
 /** @type {Strings} */
 const ZH = Object.freeze({
     description: [
-        "Convert one web article (blog, news, docs) into clean, de-noised Markdown with the 墨探 / mdcli converter.",
-        "Use it instead of fetching and extracting by hand whenever a page or URL should become Markdown or its main text extracted,",
-        "including when the user mentions mdcli or 墨探. JS-rendered and anti-bot sites switch to a browser automatically;",
-        "images become absolute URLs, code fences and GFM tables are preserved.",
-        "Long articles are truncated at safe block boundaries with --truncate, or saved to disk with save.",
+        "Get the text of one web page (URL) or local HTML file, cleaned of navigation and boilerplate, via 墨探 / mdcli;",
+        "JS-rendered and anti-bot pages use a browser automatically. Prefer it over web_fetch, and fall back to web_fetch",
+        "only if it fails. max_tokens truncates, save writes the result to disk.",
     ].join(" "),
     notInstalled:
         "mdcli 未安装，且插件禁用或不允许自动安装（allowInstall=false）。请先运行 pipx install omni-article-markdown（或 uv tool install omni-article-markdown）后重试。",

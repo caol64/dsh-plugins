@@ -213,6 +213,43 @@ omni-article-markdown (dsh-omni-article-markdown)
 
 **另一处同类误判**：`dsh plugin add ./相对路径` 是否可用，取决于调用时的 cwd——`anchorPathSpec` 在 launcher 里完成解析，profile 目录执行 pnpm 时已经是绝对路径。自测时必须**从仓库外**（例如 `/`）执行，才能复现用户真实操作。
 
+### 4.9 固化了"验证方法"却不保护"验证器"：两份 dev.sh 漂移，自测出现假阳性
+
+**背景**：`dsh-zhihu-global-search` 出现后，`scripts/dev.sh` 被整个复制了一份。基线比对显示差异并不只是
+包名：`dev:dump` 的行提取在 omni 副本里是错的（`awk` 的 `keep` 在首个不匹配的 banner 之后**永久为真**，
+会打印整棵树）；同时两份副本的探针断言写法不同。为了"每个插件都真的会被断言"，决定把实现收敛到仓库根的
+[`scripts/dev.sh`](../../scripts/dev.sh)，插件目录只留转参薄壳。
+
+**收敛过程中暴露的三个真实缺陷**（都发生在共享脚本里，全部已修）：
+
+1. **`pnpm run <script>` 会把脚本名再追加进参数**：`pnpm run dev:check` 实际执行
+   `bash scripts/dev.sh dev:check`。薄壳若把 `$@` 原样转发，共享脚本收到的是
+   `<plugin-dir> dev:check`，动作变成路径——于是只打印 usage。更糟的是：若薄壳"过滤掉像脚本名的参数"来
+   绕过它，真正的 `check` 也会被一起过滤掉。正确做法是只丢掉**第一个**且形如 `dev:*` / `*/dev.sh` /
+   `scripts/*` 的参数。
+2. **探针的断言语义有两条分支，检查却只做子串匹配**：探针在"没有声明任何工具"时也会打印
+   `present=true`，而 `check` 用 `grep 'DEVPROBE .*present=true'` 判断——于是**任何**情况都能通过。
+3. **同一个概念有两个变量**：`TOOLS`（真正传进探针的值）和 `TOOL`（只用于显示标签）。故障注入时拷了旧
+   脚本到临时备份，回滚把 `TOOLS` 也一起还原，`TOOL` 却仍带着被注入的假值，一度把"注入了假工具名却通过"
+   归因给了 grep。
+
+**修复**：
+
+- 单一变量 `TOOLS`（来自 `package.json` 的 `dsh.tools`），`check` 解析探针那一行：声明了工具就必须出现
+  `tool=<该工具> present=true`，出现 `present=false` 一律失败。
+- 安装副本比对不再用 `diff` + `sed` 拼字符串（mac 的 BSD sed 对含 `/` 的路径转义直接报
+  `bad flag in substitute command`，而该错误被 `2>/dev/null` 吞掉，等于**从不报告缺失文件**），改为一个
+  Node 比较器：逐字节比对 + 用 `files` 规则（含单段 `*`）找出"应该发布但缺失"的文件，退出码区分
+  `1=内容不同` / `2=缺发布文件`。
+- 沙箱位置统一到仓库根 `.dev/`，`clean` 幂等。
+
+**回归手段**：故障注入必须**真的注入到实际生效的变量**，并在两个入口（`pnpm run check`、`bash
+scripts/dev.sh check`）各验一次：`dsh.tools` 写成不存在的工具名时，两者都必须以非 0 退出并打印
+`DEVPROBE missing=<名>`。只改显示标签不算注入——这次就是这样发现 `TOOL`/`TOOLS` 双变量问题的。
+
+**教训**：把"验证方法"产品化成脚本时，脚本本身就是被验证的对象。「自测全绿」只有在有人真的用坏输入把
+它打红过之后，才是一个结论。
+
 ## 5. 验证方法论（可直接复用）
 
 分三层，**下一层不能靠上一层的结论推出来**。这三层现已固化进 `scripts/dev.sh`。

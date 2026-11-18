@@ -44,10 +44,41 @@
     ```js
     const optional = (ctx, key) => { try { return ctx[key]; } catch { return undefined; } };
     ```
-- **`defineTool.parameters` 用 authoring DSL，不是 JSON Schema**：
-  - ✅ `{ url: { type: 'string', required: true } }`
-  - 🚫 `{ type: 'object', properties: {...}, required: ['url'] }`（会抛 `JsonSchemaError`）
-  - `output.schema` 才是 JSON Schema 子集。
+- **`defineTool` 的 `parameters` 和 `output.schema` 都用 value DSL，不是 JSON Schema**。
+  两处都是"作者写 DSL → `defineTool` 编译成 JSON Schema"，编译在 `apply()` 里同步发生：
+  写错会抛 `JsonSchemaError`，插件激活失败，工具根本不注册。
+  - **节点键只有** `type` / `enum` / `const` / `oneOf`（与 `type` 互斥）/ `properties` /
+    `additionalProperties` / `items`，外加注解 `description` / `title` / `default` / `examples`；
+    属性上额外允许 `required`。其它键一律报 `xxx is not supported by the value schema DSL`。
+  - ✅ 必填：属性级标记，由编译器提升到父对象的 `required` 数组 ——
+    `{ type: 'object', additionalProperties: false, properties: { url: { type: 'string', required: true } } }`
+  - 🚫 根级 `required: ['url']` **不是**合法节点（参数侧和输出侧都是），报
+    `schema.required is not supported by the value schema DSL`。
+  - 🚫 `type: 'object'` **必须**显式写 `additionalProperties: true|false`，漏写报
+    `schema.additionalProperties must be explicitly true or false`。
+  - 可选性只有一条规则：**没有 `required: true` 标记的属性都是可选的**（参数侧与输出侧相同，
+    没有 `optional` 语法）。参数侧可以整个省略；输出侧要注意注册表校验的是**返回值的实际形态**，
+    所以"可选但出现"的字段必须真写对，schema 不会替它补默认值。
+  - 任意 JSON 值用 `{ type: 'json' }`（编译成空 schema `{}`，只做注解）。
+  - `additionalProperties: false` 会让注册表**静默丢弃**多余字段，所以输出 schema 与
+    实际返回值要成对维护，测试里要有 schema 自洽断言。
+  - 具体节点规则以已安装包的 `lib/types/schema.js`（`runSchemaCompiler`）为准，本笔记只记录
+    会让人踩坑的差异。要核对某条规则，可以直接对已安装包跑一小段断言，而不是读笔记：
+
+    ```bash
+    # 在任一插件目录下执行：对已安装的 dsh-tools 直接验证一条规则
+    node -e '
+      const path = require("node:path");
+      const spec = process.argv[1];
+      const schema = require(path.join(path.dirname(require.resolve(spec + "/package.json")), "lib/types/schema.js"));
+      try {
+        schema.valueSchemaSpecToJsonSchema({ type: "object", properties: { a: { type: "string" } }, required: ["a"] });
+        console.log("accepted");
+      } catch (error) {
+        console.log("rejected:", error.message);
+      }
+    ' @deepseek-ai/dsh-tools
+    ```
 - **`cordis.patch.yml` 只写 `id` + `name`**，不要把整份 `config` 内联进去：用户覆盖是**替换**语义而非深合并，内联默认值会把用户的局部覆盖变成整块丢失。
 - **`dsh <app>` 等价于 `--profile <app>`**：应用名就是 profile 名，`--profile` 只能出现一次；`--patch` 是启动器参数，需要显式 `--profile`。
 - **`file:` 安装是拷贝**，且 pnpm 按版本号缓存：源码改了但版本号不变时，`pnpm add`/`pnpm install` 可能复用旧拷贝。刷新前先 `rm -rf <profile>/node_modules/<pkg>`。
@@ -77,7 +108,23 @@ DSH_HOME=<repo>/.dev/home dsh --profile <app> --patch ./probe.patch.yml "noop"
 - `web` 应用可加 `--no-open --port 0`（OS 分配空闲端口、不打开浏览器），**绝不占用 3080**；
 - 首次运行会因缺少凭据报 `MISSING_CREDENTIAL`——只有在需要真的调用模型时才需要凭据，插件注册阶段不受影响。
 
-每个项目的 `AGENTS.md` 应说明它自己的自测脚本入口。若项目尚无脚本，可参照上述模式新增一个 `scripts/dev.sh`。
+### 3.1 自测脚本是共享的：`scripts/dev.sh` + 两行薄壳
+
+仓库根目录的 [`scripts/dev.sh`](scripts/dev.sh) 是**唯一**的自测实现（上面的标准做法、`~/.dsh` 守卫、`pnpm` 缓存清理、安装副本比对都已固化进去）。每个插件只保留一个薄壳 `scripts/dev.sh`，它把参数原样转给共享脚本：
+
+```bash
+exec bash "$PLUGIN_DIR/../scripts/dev.sh" "$PLUGIN_DIR" "${args[@]}"
+```
+
+共享脚本**不写死任何插件**，全部从插件的 `package.json` 读取：
+
+| 读什么 | 用来做什么 | 缺省时 |
+|---|---|---|
+| `name` | profile 里的依赖名、安装副本路径、`dev:dump` 的行匹配 | 必填 |
+| `dsh.tools`（数组或对象） | `check` 在真实宿主里断言这些工具已注册 | 不声明时只验证插件激活 |
+| `dsh.client` | 是否汇报包 RPC 桥（设置页能否挂载） | 不汇报 |
+
+新增插件时：写一个薄壳、在 `package.json` 声明 `dsh.tools`（注册了原生工具就必须声明），**不要**再复制一份完整脚本——复制出的副本已经漂移过一次（见 `docs/DEVELOPMENT-LOG.md` 的 4.9）。
 
 ## 4. 交付纪律
 
@@ -91,5 +138,8 @@ DSH_HOME=<repo>/.dev/home dsh --profile <app> --patch ./probe.patch.yml "noop"
 | 项目 | 说明 | 专属规则 |
 |---|---|---|
 | `omni-article-markdown-plugin/` | 把墨探 `mdcli` 封装成 `md_article` 原生工具 | 见 `omni-article-markdown-plugin/AGENTS.md` |
+| `dsh-zhihu-global-search/` | 知乎开放平台全网搜索 → `zhihu_global_search` 工具 + 设置页录入 Access Secret（凭据存储） | 见 `dsh-zhihu-global-search/AGENTS.md` |
+| `dsh-session-delete/` | 侧栏会话菜单最下面的「删除会话」：停回合 → 删日志目录 / 投影缓存 → 清记账 → `api-session/removed` 刷新列表（Host 路由 + Client 菜单项，无原生工具） | 见 `dsh-session-delete/AGENTS.md` |
+| `scripts/` | 仓库级共享自测脚本（`dev.sh`），被每个插件的薄壳调用 | — |
 
 新增插件时，请在上表登记，并在插件目录内提供自己的 `AGENTS.md`（写项目独有的目录结构、脚本入口、领域约束），通用规则不要复制过去。

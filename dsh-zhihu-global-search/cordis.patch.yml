@@ -1,0 +1,25 @@
+# Bundle patch layer for dsh-zhihu-global-search.
+#
+# The row loads this package into the host, which registers the
+# `zhihu_global_search` native tool, and (on the web client) the settings page
+# under Settings → Zhihu global search.
+#
+# Credentials are never part of this row. The Access Secret lives in the
+# harness credential store under the reference named by `accessSecretEnv`
+# (default `ZHIHU_ACCESS_SECRET`); the settings page writes it through
+# `ctx.remote.credentials`, and the process environment is the fallback layer.
+# A row that carries a literal secret key is rejected at activation.
+#
+# Every config key has a default and can be omitted. Override values in the
+# profile's own patch file (`~/.dsh/profiles/web/cordis.patch.yml`) with a row
+# that targets `id: zhihu-global-search` and lists ONLY the keys to change:
+#
+#   - id: zhihu-global-search
+#     config:
+#       accessSecretEnv: ZHIHU_TEAM_SECRET
+#
+# Do not restate the whole config there: the config object is replaced, not
+# merged, so a partial row silently resets the other keys to their defaults.
+- insert:
+    - id: zhihu-global-search
+      name: dsh-zhihu-global-search

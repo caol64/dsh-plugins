@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Zhihu global search">
+  <defs>
+    <linearGradient id="zhihu-search-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1f7fdb"/>
+      <stop offset="1" stop-color="#0d5bb5"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#zhihu-search-bg)"/>
+  <circle cx="28" cy="27" r="12.5" fill="none" stroke="#ffffff" stroke-width="5"/>
+  <line x1="37.5" y1="36.5" x2="49" y2="48" stroke="#ffffff" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="23.5" cy="22.5" r="2.6" fill="#8fd0ff"/>
+</svg>

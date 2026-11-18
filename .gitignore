@@ -1,4 +1,4 @@
-# isolated dev sandbox (see scripts/dev.sh)
+# isolated dev sandbox of the shared harness (scripts/dev.sh)
 .dev/
 
 # installed dependencies (the plugin itself is zero-dependency)

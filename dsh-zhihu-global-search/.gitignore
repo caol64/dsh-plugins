@@ -1,0 +1,11 @@
+# isolated dev sandbox (see scripts/dev.sh)
+.dev/
+
+# installed dependencies (the plugin itself is zero-dependency)
+node_modules/
+
+# stray local pnpm store created by pnpm in a directory without pnpm-workspace.yaml
+.pnpm-store/
+
+# OS noise
+.DS_Store

@@ -1,0 +1,90 @@
+{
+  "name": "dsh-zhihu-global-search",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness plugin exposing the Zhihu Open Platform global search API as a native zhihu_global_search tool, with a settings page that stores the Access Secret in the harness credential store.",
+  "type": "module",
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "client.js",
+    "src",
+    "locale/*.json",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0",
+    "dsh": ">0.2.0-0 <0.2.2 || >=0.2.2-0 <0.3.0"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "zhihu",
+    "global-search",
+    "web-search"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/caol64/dsh-plugins.git",
+    "directory": "dsh-zhihu-global-search"
+  },
+  "homepage": "https://github.com/caol64/dsh-plugins/tree/main/dsh-zhihu-global-search#readme",
+  "bugs": {
+    "url": "https://github.com/caol64/dsh-plugins/issues"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "check": "bash scripts/dev.sh check",
+    "check:installed": "bash scripts/dev.sh check --with-installed",
+    "dev:boot": "bash scripts/dev.sh boot",
+    "dev:dump": "bash scripts/dev.sh dump",
+    "clean": "bash scripts/dev.sh clean",
+    "pack:tarball": "pnpm pack --pack-destination .dist"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    },
+    "tools": [
+      "zhihu_global_search"
+    ]
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1"
+  }
+}

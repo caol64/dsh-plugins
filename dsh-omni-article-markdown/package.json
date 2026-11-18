@@ -52,7 +52,10 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    }
+    },
+    "tools": [
+      "md_article"
+    ]
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",

@@ -15,8 +15,8 @@ src/env.mjs          定位 mdcli、解析版本、--truncate 能力门禁
 src/run.mjs          参数数组组装、spawn、超时、取消、stderr 解析
 src/errors.mjs       失败文本 → 分类 + 是否重试 + 可行动文案
 src/setup.mjs        缺失时自动安装 mdcli（pipx→uv→pip）与 Chromium
-src/tool.mjs         工具描述、参数 authoring DSL、输出 schema、中英文文案
-scripts/dev.sh       隔离自测入口
+src/tool.mjs         工具描述、value DSL 的参数与输出 schema、中英文文案
+scripts/dev.sh       薄壳：把参数转给仓库根的共享自测脚本 ../scripts/dev.sh
 docs/DEVELOPMENT-LOG.md  设计决策与全部踩坑记录（改设计前先读）
 ```
 
@@ -33,7 +33,7 @@ pnpm run dev:dump            # 打印组合后的 profile 树中本项目那一�
 pnpm run clean               # 停掉隔离进程并删除 .dev/
 ```
 
-隔离沙箱在 `.dev/`（已 gitignore）。`scripts/dev.sh` 内置保护：任何操作落在 `~/.dsh` 下都会直接拒绝执行。
+隔离沙箱在仓库根 `.dev/`（已 gitignore）。自测实现全部在仓库根的 `../scripts/dev.sh`，本目录的 `scripts/dev.sh` 只是薄壳；`~/.dsh` 守卫、`pnpm` 版本缓存清理、安装副本比对都在共享脚本里。`check` 断言的工具名来自 `package.json` 的 `dsh.tools`——**改名 `md_article` 时必须同步这个声明**，否则自测会对着旧名字断言。
 
 交付到用户 profile（**跨工作区写入，需用户授权**，且之后再重启宿主）。优先用 `dsh plugin`，它会同步 `dsh.profile.bundles`，省掉手动改 `package.json`：
 
