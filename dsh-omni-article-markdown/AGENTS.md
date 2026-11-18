@@ -35,13 +35,29 @@ pnpm run clean               # 停掉隔离进程并删除 .dev/
 
 隔离沙箱在 `.dev/`（已 gitignore）。`scripts/dev.sh` 内置保护：任何操作落在 `~/.dsh` 下都会直接拒绝执行。
 
-交付到用户 profile（**跨工作区写入，需用户授权**，且之后再重启宿主）：
+交付到用户 profile（**跨工作区写入，需用户授权**，且之后再重启宿主）。优先用 `dsh plugin`，它会同步 `dsh.profile.bundles`，省掉手动改 `package.json`：
 
 ```bash
-cd ~/.dsh/profiles/web
-rm -rf node_modules/dsh-omni-article-markdown     # pnpm 会按版本号复用旧拷贝
-pnpm add "file:~/work/projects/dsh-plugins/dsh-omni-article-markdown"
+rm -rf ~/.dsh/profiles/web/node_modules/dsh-omni-article-markdown   # pnpm 会按版本号复用旧拷贝
+dsh plugin --profile web add "$HOME/work/projects/dsh-plugins/dsh-omni-article-markdown"
+# 等价的手动写法（需要自己把包名加进 bundles）：
+#   cd ~/.dsh/profiles/web && pnpm add "file:$HOME/work/projects/dsh-plugins/dsh-omni-article-markdown"
 ```
+
+### 安装 spec 只允许这几种
+
+本仓库是「一仓库多插件」，插件位于子目录，所以**不能**用 `github:<owner>/<repo>` 直接安装（根目录没有 `package.json`）。合法写法：
+
+| spec | 说明 |
+|---|---|
+| `dsh-omni-article-markdown` / `…@latest` | npm registry（发布后可用，`dsh plugin` 会做安装前预检） |
+| `https://github.com/caol64/dsh-plugins/releases/download/v<ver>/dsh-omni-article-markdown-<ver>.tgz` | Release tar 包，由 `.github/workflows/release.yml` 构建 |
+| `./相对路径`、`file:$HOME/…` | 克隆后的本地子目录（装成 `link:`，**路径不能删/移**） |
+| `github:caol64/dsh-plugins#path:/dsh-omni-article-markdown` | 唯一合法的 git spec，子目录必须走 `#path:` |
+
+**`github:caol64/dsh-plugins/dsh-omni-article-markdown` 是错的**：pnpm 会把整个路径当仓库名，报 `ERR_PNPM_GIT_RESOLVE_FAILED`。不要在任何文档里恢复这种写法，也不要假设 pnpm 支持 `<owner>/<repo>/<subdir>`。
+
+发版：改 `package.json` 的 `version` 并推到 `main`，workflow 会跑测试、`pnpm pack`、创建/更新 `v<version>` Release。`package.json` 的 `files` 白名单决定 tar 包内容，新增运行时文件必须同步进去。
 
 ## 3. 本项目专属红线
 

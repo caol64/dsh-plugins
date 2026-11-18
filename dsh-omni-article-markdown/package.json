@@ -31,13 +31,23 @@
     "article"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/caol64/dsh-plugins.git",
+    "directory": "dsh-omni-article-markdown"
+  },
+  "homepage": "https://github.com/caol64/dsh-plugins/tree/main/dsh-omni-article-markdown#readme",
+  "bugs": {
+    "url": "https://github.com/caol64/dsh-plugins/issues"
+  },
   "scripts": {
     "test": "node --test \"test/*.test.mjs\"",
     "check": "bash scripts/dev.sh check",
     "check:installed": "bash scripts/dev.sh check --with-installed",
     "dev:boot": "bash scripts/dev.sh boot",
     "dev:dump": "bash scripts/dev.sh dump",
-    "clean": "bash scripts/dev.sh clean"
+    "clean": "bash scripts/dev.sh clean",
+    "pack:tarball": "pnpm pack --pack-destination .dist"
   },
   "dsh": {
     "bundle": {

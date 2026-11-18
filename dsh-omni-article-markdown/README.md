@@ -10,51 +10,82 @@ DeepSeek Harness 插件，把 [墨探 / omni-article-markdown](https://github.co
 
 本插件是一个带 bundle patch（`dsh.bundle.patch`）的包，因此安装方式与其他 DSH 插件相同，**推荐使用 `dsh plugin add`**。
 
-本仓库 [caol64/dsh-plugins](https://github.com/caol64/dsh-plugins) 按“每个子目录一个插件”组织，插件本体在 `dsh-omni-article-markdown/` 子目录中。pnpm 支持**仓库的子目录路径**语法 `<owner>/<repo>/<subdir>`，直接把这段路径当作包名安装即可，无需先克隆仓库。
+仓库 [caol64/dsh-plugins](https://github.com/caol64/dsh-plugins) 按「每个子目录一个插件」组织，插件本体在 `dsh-omni-article-markdown/` 子目录中。由于子目录不是仓库根，**不能**像单包仓库那样直接 `github:owner/repo` 安装；请从下表中选择一种方式：
 
-### 方式一：`dsh plugin add`（推荐）
+| 方式 | 命令 | 适用场景 |
+|---|---|---|
+| **npm**（推荐） | `dsh plugin --profile web add dsh-omni-article-markdown` | 版本化、可回滚，安装前做兼容性预检 |
+| **Release tar 包** | `dsh plugin --profile web add "<tarball URL>"` | 不想依赖 git，锁定某个版本 |
+| **本地目录** | `git clone …` 后 `dsh plugin --profile web add "./dsh-plugins/dsh-omni-article-markdown"` | 要改代码、离线、或跟进最新提交 |
 
-```bash
-# 从 GitHub 仓库安装（无需克隆）
-dsh plugin --profile web add "github:caol64/dsh-plugins/dsh-omni-article-markdown"
-
-# 或已克隆到本地时，从子目录安装（相对路径按当前目录解析）
-dsh plugin --profile web add "./dsh-plugins/dsh-omni-article-markdown"
-```
-
-`dsh plugin` 会：初始化 profile（首次运行时）、在该 profile 目录内调用 pnpm 安装、检查版本兼容性，并**自动把这个 bundle 追加进 `dsh.profile.bundles`**——因此上面的手动改 `package.json` 步骤可以完全跳过。随后重启宿主并刷新页面即可。
+`dsh plugin` 会：初始化 profile（首次运行时）、在该 profile 目录内调用 pnpm 安装、检查版本兼容性，并**自动把这个 bundle 追加进 `dsh.profile.bundles`**——无需手动编辑 `package.json`。安装后重启宿主并刷新页面。
 
 要点：
 
 - `--profile <name>` 是 `dsh plugin` 的**必填参数**，用来指定插件装到哪个 app 的 profile。**应用名就是 profile 名**：装到 Web GUI 用 `web`，CLI 用 `tui`，一次性任务用 `headless`。
 - 写在子命令 `add` **前面**；`dsh plugin add --profile web …` 不是有效写法。
-- 路径参数建议加引号，避免 shell 展开。不带 `.` 前缀的 `~/…` 不会被 pnpm 展开，请写绝对路径或 `$HOME`。
-- 安装成功后 `package.json` 里应出现依赖项，bundle 列表末尾多出 `dsh-omni-article-markdown`：
+- 路径/URL 建议加引号，避免 shell 展开。不带 `.` 前缀的 `~/…` 不会被 pnpm 展开，请写绝对路径或 `$HOME`。
 
-  ```json
-  {
-    "dependencies": { "dsh-omni-article-markdown": "github:caol64/dsh-plugins/dsh-omni-article-markdown" },
-    "dsh": {
-      "profile": {
-        "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-omni-article-markdown"]
-      }
+### 方式一：从 npm 安装（推荐）
+
+```bash
+dsh plugin --profile web add dsh-omni-article-markdown
+```
+
+安装成功后 `package.json` 里应出现依赖项，bundle 列表末尾多出 `dsh-omni-article-markdown`：
+
+```json
+{
+  "dependencies": { "dsh-omni-article-markdown": "^0.1.0" },
+  "dsh": {
+    "profile": {
+      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-omni-article-markdown"]
     }
   }
-  ```
+}
+```
 
-### 方式二：手动 pnpm + 编辑 bundle 列表
+> 发布者：本仓库使用 `registry.npmmirror.com` 镜像，镜像不支持发布，请显式指定官方源：
+> `pnpm publish --registry https://registry.npmjs.org --access public`。
+
+### 方式二：从 GitHub Release 的 tar 包安装
+
+每个版本都会在 [Releases](https://github.com/caol64/dsh-plugins/releases) 页附带 `dsh-omni-article-markdown-<version>.tgz`（由 `.github/workflows/release.yml` 构建，只含 `files` 白名单中的文件）：
+
+```bash
+dsh plugin --profile web add "https://github.com/caol64/dsh-plugins/releases/download/v0.1.0/dsh-omni-article-markdown-0.1.0.tgz"
+```
+
+也可以下载后传本地路径：
+
+```bash
+dsh plugin --profile web add "./dsh-omni-article-markdown-0.1.0.tgz"
+```
+
+代价：URL 里固定了版本，升级需要换 URL；tarball 不属于 registry spec，`dsh plugin` 的**安装前预检会被跳过**，兼容性检查在安装完成后才进行。
+
+### 方式三：克隆仓库后从本地目录安装
+
+```bash
+git clone https://github.com/caol64/dsh-plugins.git
+dsh plugin --profile web add "./dsh-plugins/dsh-omni-article-markdown"
+```
+
+相对路径按**执行命令时的当前目录**解析。这种方式装成 `link:`，指向克隆目录，之后 `git pull` 即拿到新代码——但这也意味着**克隆目录不能删或移动**。
+
+> 也可以直接引用 git 仓库的子目录，但必须用 `#path:` 指定，**把子目录拼在仓库名后面是无效的**（pnpm 会把 `caol64/dsh-plugins/dsh-omni-article-markdown` 整体当成仓库名，报 `ERR_PNPM_GIT_RESOLVE_FAILED`）：
+>
+> ```bash
+> dsh plugin --profile web add "github:caol64/dsh-plugins#path:/dsh-omni-article-markdown"
+> ```
+
+### 手动 pnpm + 编辑 bundle 列表
 
 不使用 `dsh plugin` 时，需要自己完成同样两件事：
 
 ```bash
-# 从 GitHub 仓库安装（无需克隆）
 cd ~/.dsh/profiles/web
-pnpm add "github:caol64/dsh-plugins/dsh-omni-article-markdown"
-
-# 或先克隆仓库，再从本地子目录安装
-git clone https://github.com/caol64/dsh-plugins.git
-cd ~/.dsh/profiles/web
-pnpm add "file:$HOME/dsh-plugins/dsh-omni-article-markdown"
+pnpm add dsh-omni-article-markdown                        # 或 tarball / file: 形式的 spec
 ```
 
 然后在 `~/.dsh/profiles/web/package.json` 的 bundle 列表里手动加入 `dsh-omni-article-markdown`：
@@ -63,37 +94,36 @@ pnpm add "file:$HOME/dsh-plugins/dsh-omni-article-markdown"
 {
   "dsh": {
     "profile": {
-      "bundles": [
-        "@deepseek-ai/dsh-base",
-        "@deepseek-ai/dsh-web-app",
-        "dsh-omni-article-markdown"
-      ]
+      "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-omni-article-markdown"]
     }
   }
 }
 ```
 
-再重启 `dsh web`（或你使用的客户端）并刷新页面。
-
-两种来源的区别：`file:` 安装会把整个插件目录拷进 profile 的 `node_modules`，因此**本机克隆路径变动后需要重新安装**；`github:` 方式由 pnpm 托管，重装即可拉到最新提交。
-
-> 目前插件**未发布到 npm**，直接写包名安装会在 registry 中报 404，请始终使用上面的 `github:` 或 `file:` 形式。
+再重启 `dsh web`（或你使用的客户端）并刷新页面。卸载时除了 `pnpm remove`，还要手工删掉这条 bundle 条目。
 
 ### 环境要求与生效确认
 
-环境要求：DSH `0.2.x`（声明为 `engines.dsh: >0.2.0-0 <0.2.2 || >=0.2.2-0 <0.3.0`）。dsh 把 `engines.dsh` 作为唯一的兼容门禁，**范围不匹配的 bundle 会被静默跳过**——普通的 `>=0.2.1` 永远匹配不到 `0.2.2-rc.1` 这类预发布版本。`dsh plugin` 在安装时会预检兼容性，拒绝时会提示用 `dsh plugin --profile web allow-version … --accept-risk` 显式放行（请谨慎使用）。新会话的工具集中应能看到 `md_article`。
+环境要求：DSH `0.2.x`（声明为 `engines.dsh: >0.2.0-0 <0.2.2 || >=0.2.2-0 <0.3.0`）。dsh 把 `engines.dsh` 作为唯一的兼容门禁，**范围不匹配的 bundle 会被静默跳过**——普通的 `>=0.2.1` 永远匹配不到 `0.2.2-rc.1` 这类预发布版本。
+
+`dsh plugin` 对 npm 包会在安装前预检兼容性，拒绝时提示用 `dsh plugin --profile web allow-version … --accept-risk` 显式放行（请谨慎使用）；tarball 与本地/git spec 只在安装完成后检查。新会话的工具集中应能看到 `md_article`。
 
 ### 更新与卸载
 
 ```bash
-# 更新到默认分支最新提交（重新拉取后重启宿主）
-dsh plugin --profile web add "github:caol64/dsh-plugins/dsh-omni-article-markdown"
+# npm：升级到最新版本
+dsh plugin --profile web add dsh-omni-article-markdown@latest
+
+# 本地目录：拉取新代码后重新安装（pnpm 会按版本号复用旧拷贝，先清掉）
+git -C ~/dsh-plugins pull
+rm -rf ~/.dsh/profiles/web/node_modules/dsh-omni-article-markdown
+dsh plugin --profile web add "$HOME/dsh-plugins/dsh-omni-article-markdown"
 
 # 卸载（同时从 bundle 列表移除）
 dsh plugin --profile web remove dsh-omni-article-markdown
 ```
 
-手动 pnpm 方式下，对应的更新/卸载命令相同，但需要自己从 bundle 列表中删除条目。
+tarball 安装的升级方式是用新版本的 URL 再执行一次 `add`。任何方式更新后都需要重启宿主。
 
 ## 工具参数
 

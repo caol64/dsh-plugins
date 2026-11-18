@@ -195,6 +195,24 @@ omni-article-markdown (dsh-omni-article-markdown)
 
 **另外的教训**：验证过程中曾在 `~/.dsh/profiles/web` 误执行 `pnpm add`（已核实无副作用）。`dev.sh` 因此加了守卫——任何操作路径落在 `~/.dsh` 下直接拒绝执行。
 
+---
+
+### 4.8 文档里写了一个不存在的 pnpm spec：`github:<owner>/<repo>/<subdir>`
+
+**现象**：按 README 执行 `dsh plugin --profile web add "github:caol64/dsh-plugins/dsh-omni-article-markdown"`，得到
+`ERR_PNPM_GIT_RESOLVE_FAILED`，git 去拉的仓库是 `github.com/caol64/dsh-plugins/dsh-omni-article-markdown.git`。
+
+**根因**：pnpm 的 `github:` 解析器只认 `owner/repo`（可选 `#ref`），**没有子目录语法**；第三段被当作仓库名的一部分。README 当时凭印象写了“pnpm 支持 `<owner>/<repo>/<subdir>`”，属于事实性错误——用户撞上后才发现。
+
+**修复与约束**：
+
+- 仓库内所有文档只使用四种合法 spec：npm 包名、Release `.tgz` URL、本地路径（`./x`、`file:$HOME/x`）、`github:<owner>/<repo>#path:/<subdir>`。
+- 已实测：`github:caol64/dsh-plugins#path:/dsh-omni-article-markdown` 解析正确；不带 `#path:` 时报的是“仓库不存在”。
+- 由于一仓库多插件、根目录无 `package.json`，`github:owner/repo`（整仓）不可用；且即便补成 pnpm workspace，git 安装时 workspace 子包的 peer/engines 也不会被装上，版本门禁会“看起来通过”。
+- 分发因此改为两条腿：npm（发布时显式 `--registry https://registry.npmjs.org`，本机默认是 npmmirror 镜像，不能发布）+ `.github/workflows/release.yml` 把 `pnpm pack` 产物挂到 Release。
+
+**另一处同类误判**：`dsh plugin add ./相对路径` 是否可用，取决于调用时的 cwd——`anchorPathSpec` 在 launcher 里完成解析，profile 目录执行 pnpm 时已经是绝对路径。自测时必须**从仓库外**（例如 `/`）执行，才能复现用户真实操作。
+
 ## 5. 验证方法论（可直接复用）
 
 分三层，**下一层不能靠上一层的结论推出来**。这三层现已固化进 `scripts/dev.sh`。

@@ -1,0 +1,120 @@
+# Build the plugin tarballs and attach them to a GitHub Release.
+#
+# The repository is published as `github:<owner>/<repo>#path:/<subdir>` at best,
+# and pnpm cannot address a subdirectory without `#path:`. Shipping a tarball per
+# plugin keeps installation a single URL that needs no git, no clone, and no
+# npm account:
+#
+#   dsh plugin --profile web add "https://github.com/<owner>/<repo>/releases/download/v<version>/<pkg>-<version>.tgz"
+#
+# A release is created (or updated in place) per package version, named
+# `v<version>` for the single-plugin case. Bump `version` in the plugin's
+# package.json to publish a new one; re-running for an unchanged version is
+# idempotent and only replaces the asset.
+name: release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      plugins: ${{ steps.find.outputs.plugins }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: find
+        # Every direct child directory whose package.json declares a dsh bundle
+        # is a plugin of this repository.
+        run: |
+          set -euo pipefail
+          plugins="[]"
+          for manifest in */package.json; do
+            dir="$(dirname "$manifest")"
+            if ! node -e 'const m=require(process.argv[1]);process.exit(m.dsh&&m.dsh.bundle?0:1)' "./$manifest"; then
+              continue
+            fi
+            plugins="$(node -e '
+              const fs = require("node:fs");
+              const m = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              const list = JSON.parse(process.argv[2]);
+              list.push({ dir: process.argv[3], name: m.name, version: m.version });
+              process.stdout.write(JSON.stringify(list));
+            ' "./$manifest" "$plugins" "$dir")"
+          done
+          echo "plugins=$plugins" >> "$GITHUB_OUTPUT"
+          echo "plugins: $plugins"
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.plugins != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJSON(needs.discover.outputs.plugins) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: ${{ matrix.plugin.dir }}/pnpm-lock.yaml
+
+      - name: install
+        working-directory: ${{ matrix.plugin.dir }}
+        run: pnpm install --frozen-lockfile
+
+      - name: test
+        working-directory: ${{ matrix.plugin.dir }}
+        run: pnpm test
+
+      # `pnpm pack` honours the package's `files` whitelist, so the tarball ships
+      # exactly what an npm install would deliver (no test/, docs/, scripts/).
+      - name: pack
+        id: pack
+        working-directory: ${{ matrix.plugin.dir }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/dist"
+          tarball="$(pnpm pack --pack-destination "$RUNNER_TEMP/dist" | tail -n 1 | sed 's/^.*\/\([^/]*\.tgz\)$/\1/')"
+          echo "file=$RUNNER_TEMP/dist/$tarball" >> "$GITHUB_OUTPUT"
+          echo "name=$tarball" >> "$GITHUB_OUTPUT"
+          echo "packed $tarball"
+          tar tzf "$RUNNER_TEMP/dist/$tarball"
+
+      - name: upload asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ matrix.plugin.version }}
+          TARBALL: ${{ steps.pack.outputs.file }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$TARBALL" --clobber
+          else
+            gh release create "$TAG" "$TARBALL" \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --notes "Release $TAG. Install:
+
+          \`\`\`bash
+          dsh plugin --profile web add \"https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/$(basename "$TARBALL")\"
+          \`\`\`"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.plugin.name }}-${{ matrix.plugin.version }}
+          path: ${{ steps.pack.outputs.file }}
+          if-no-files-found: error
