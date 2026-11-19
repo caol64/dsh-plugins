@@ -3,13 +3,16 @@
  * as a native DeepSeek Harness tool.
  *
  * The host half owns four jobs: hold the configuration (never a secret), build
- * the per-call secret resolver over `ctx.credentials`, register
+ * the per-call secret resolver over THIS PLUGIN'S OWN store, register
  * `zhihu_global_search`, and project results for the model and the UI. The
  * settings page that writes the Access Secret lives in `./client`.
  *
  * Security contract enforced here:
- *  - configuration carries a credential REFERENCE (`accessSecretEnv`) only; a
- *    key that looks like a literal secret is rejected at activation;
+ *  - configuration carries an environment-variable NAME (`accessSecretEnv`) only
+ *    for the read-only fallback; a key that looks like a literal secret is
+ *    rejected at activation;
+ *  - the secret lives in `<DSH_HOME>/storages/dsh-zhihu-global-search/` (mode
+ *    0700/0600, atomic writes), never in the machine-wide credential document;
  *  - the value is resolved per call, so a secret saved from the settings page
  *    reaches the next search without a restart;
  *  - no failure message, log line, or result carries the secret.
@@ -21,6 +24,7 @@
  * @module dsh-zhihu-global-search
  */
 import { assertNoLiteralSecret, createSecretResolver, DEFAULT_SECRET_REF, isCredentialRefName } from "./src/credentials.mjs";
+import { createSecretStore, harnessHome, resolveStoreDir } from "./src/secret-store.mjs";
 import { ArgumentError, normalizeBaseURL } from "./src/endpoint.mjs";
 import { SearchFailure, searchGlobal } from "./src/search.mjs";
 import { createSettingsRoute, SETTINGS_ROUTE } from "./src/settings-route.mjs";
@@ -48,17 +52,30 @@ export const inject = ["tools"];
 /** Defaults for every configuration key; also the documented contract. */
 export const DEFAULTS = Object.freeze({
     accessSecretEnv: DEFAULT_SECRET_REF,
+    secretStoreDir: "",
     baseURL: "https://developer.zhihu.com",
     timeoutMs: 30_000,
 });
 
 /**
- * Read an optional Cordis service without triggering its "without inject" guard.
+ * Read an optional Cordis service.
+ *
+ * `ctx.get(key)` is tried FIRST: on a real Cordis context, property access to a
+ * service this plugin did not inject throws "cannot get property without
+ * inject", so the old `try { ctx[key] }` form always yielded undefined. That
+ * silently disabled both the credential lookup used by the tool and the settings
+ * route (§4.14). The property form remains a fallback for hosts without `get`.
  * @param {object} ctx - plugin context.
  * @param {string} key - service name.
  * @returns {unknown} the service, or undefined.
  */
 function optional(ctx, key) {
+    try {
+        const viaGet = ctx.get?.(key);
+        if (viaGet !== undefined) return viaGet;
+    } catch {
+        /* fall through */
+    }
     try {
         return ctx[key];
     } catch {
@@ -101,7 +118,13 @@ export function resolveConfig(raw = {}) {
     } catch (error) {
         throw new Error(`${name}: config "baseURL": ${error.message}`);
     }
-    return /** @type {{ accessSecretEnv: string, baseURL: string, timeoutMs: number }} */ (config);
+    // The store directory: an explicit `secretStoreDir` wins; otherwise the
+    // plugin's own directory under the harness storage root.
+    config.secretStoreDir =
+        resolveStoreDir({ dir: config.secretStoreDir }) ??
+        resolveStoreDir({ storageRoot: `${harnessHome()}/storages` }) ??
+        "";
+    return /** @type {{ accessSecretEnv: string, secretStoreDir: string, baseURL: string, timeoutMs: number }} */ (config);
 }
 
 /**
@@ -129,10 +152,10 @@ function callView(text, args) {
  * supported bridge for a static `dsh.client` bundle (see `docs/DEVELOPMENT-LOG.md`
  * §4.10).
  * @param {object} ctx - plugin context.
- * @param {string} ref - host-owned credential reference.
+ * @param {{ store?: object, ref: string }} options - the plugin's own store and the env fallback name.
  * @returns {void}
  */
-export function mountSettingsRoute(ctx, ref) {
+export function mountSettingsRoute(ctx, { store, ref }) {
     // A host that exposes no `inject` at all (a minimal test host, an older
     // runtime) simply has no carrier to mount on. Reading it through the guarded
     // accessor keeps a "cannot get without inject" host from failing activation.
@@ -148,7 +171,9 @@ export function mountSettingsRoute(ctx, ref) {
             path: SETTINGS_ROUTE,
             methods: ["POST"],
             requestBody: "buffered",
-            fetch: createSettingsRoute({ ctx: inner, ref }),
+            // The route runs against this plugin's own store, so it needs no
+            // host service beyond a logger.
+            fetch: createSettingsRoute({ ctx: inner, store, ref }),
         });
         if (typeof dispose === "function") optional(ctx, "effect")?.(() => () => {
             void dispose();
@@ -189,7 +214,10 @@ function failureHandler(args, text, maxChars, ctx) {
 export async function apply(ctx, rawConfig = {}) {
     const config = resolveConfig(rawConfig);
     const text = stringsFor(optional(ctx, "i18n")?.locale);
-    const secrets = createSecretResolver({ credentials: optional(ctx, "credentials"), ref: config.accessSecretEnv });
+    // The plugin's own store. It needs no host service, so the settings page can
+    // never be disabled by a composition that omits one (§4.14).
+    const store = config.secretStoreDir === "" ? undefined : createSecretStore({ dir: config.secretStoreDir });
+    const secrets = createSecretResolver({ store, ref: config.accessSecretEnv });
 
     const { defineTool } = await import("@deepseek-ai/dsh-tools");
 
@@ -230,5 +258,5 @@ export async function apply(ctx, rawConfig = {}) {
         if (typeof registered === "function") registered();
     });
 
-    mountSettingsRoute(ctx, config.accessSecretEnv);
+    mountSettingsRoute(ctx, { store, ref: config.accessSecretEnv });
 }

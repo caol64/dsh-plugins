@@ -1,10 +1,10 @@
 # dsh-omni-article-markdown
 
-DeepSeek Harness 插件，把 [墨探 / omni-article-markdown](https://github.com/caol64/omni-article-markdown) 这个纯提示词 skill 变成一项原生能力。
+DeepSeek Harness 插件：把 [墨探](https://github.com/caol64/omni-article-markdown) 的网页正文提取能力（`mdcli`）封装成一个原生工具。
 
 它只提供一样东西：**`md_article` 工具**。一次调用即可把网页 URL（或本地 HTML 文件）转换为干净的 Markdown。插件会定位或安装 `mdcli`、按工作目录解析相对路径、透传 `--truncate` / `--save` / `read` 参数、在瞬时故障时重试一次，并把 mdcli 的 stderr 翻译成可操作的指引。
 
-插件**不注册 skill**。原版 skill 只是一组加载进模型上下文的固定指令，这部分行为如今已经落在代码里，再注册一个 skill 条目只会重复工具描述。一个“列出来但从不加载”的 skill 白白占用目录空间，一个“加载进来”的 skill 则白白消耗上下文。
+一个插件、一个工具：装上它，模型就多出 `md_article` 这一个能力，没有别的东西进入上下文。
 
 ## 安装
 

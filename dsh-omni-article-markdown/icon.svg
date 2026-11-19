@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36" width="36" height="36" role="img" aria-label="Omni article">
+  <defs>
+    <linearGradient id="omni-article-ink" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3d7fd6"/>
+      <stop offset="1" stop-color="#1c4fa0"/>
+    </linearGradient>
+  </defs>
+  <path d="M7 6.5h14l6 6v17a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-21a2 2 0 0 1 2-2Z" fill="#edf3fb"/>
+  <path d="M7 6.5h14l6 6v17a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-21a2 2 0 0 1 2-2Z" fill="none" stroke="url(#omni-article-ink)" stroke-width="2.4" stroke-linejoin="round"/>
+  <path d="M21 6.5V13h6" fill="none" stroke="url(#omni-article-ink)" stroke-width="2.4" stroke-linejoin="round"/>
+  <path d="M9.5 22.5h8" fill="none" stroke="#7d9bc4" stroke-width="2" stroke-linecap="round"/>
+  <path d="M9.5 26.5h5" fill="none" stroke="#b3c6de" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="22.5" cy="20.5" r="4.6" fill="#ffffff" stroke="#1c4fa0" stroke-width="2.4"/>
+  <line x1="25.8" y1="24" x2="29" y2="27.2" stroke="#1c4fa0" stroke-width="2.8" stroke-linecap="round"/>
+</svg>

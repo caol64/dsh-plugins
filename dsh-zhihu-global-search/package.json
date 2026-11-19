@@ -46,7 +46,7 @@
     "url": "https://github.com/caol64/dsh-plugins/issues"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "DSH_HOME=$(mktemp -d) node --test \"test/*.test.mjs\"",
     "check": "bash scripts/dev.sh check",
     "check:installed": "bash scripts/dev.sh check --with-installed",
     "dev:boot": "bash scripts/dev.sh boot",
@@ -85,6 +85,8 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "4.1.0",
     "@deepseek-ai/dsh-agent": "0.2.2-rc.1",
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.1"
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
   }
 }

@@ -6,7 +6,10 @@ description: "A DeepSeek Harness plugin that exposes the Zhihu Open Platform glo
 
 把知乎开放平台的**全网搜索**（`GET /api/v1/content/global_search`）注册为 DSH 原生工具 **`zhihu_global_search`**，并在 **设置 → 知乎全网搜索** 提供一个只做一件事的设置页：填写 / 替换 / 移除 **Access Secret**。
 
-密钥遵循 DSH 的安全准则——**配置只放引用，不放明文**：设置页写入的是宿主凭据存储（`ctx.credentials` 的 `ZHIHU_ACCESS_SECRET`），插件配置里只有引用名 `accessSecretEnv`。
+密钥遵循 DSH 的安全准则——**配置不放明文，也不占用共享凭据文档**：设置页写入的是**本插件自己的存储目录**
+`<DSH_HOME>/storages/dsh-zhihu-global-search/secret.json`（目录 `0700`、文件 `0600`、原子写），
+不会写入 `~/.dsh/.credentials.yaml`；卸载插件时删掉这个目录，密钥就一起消失。
+环境变量 `accessSecretEnv`（默认 `ZHIHU_ACCESS_SECRET`）保留为**只读回退**，存储里的值优先。
 
 ## 功能
 
@@ -38,7 +41,11 @@ dsh plugin --profile web remove dsh-zhihu-global-search
 
 ## 配置密钥（两种方式，任选）
 
-**方式一（推荐）：设置页。** 重启后打开 **设置 → 知乎全网搜索**，粘贴 Access Secret 并保存。密钥进入宿主凭据存储（本地为 credentials 存储文件），不写入任何 `cordis.patch.yml`、不进日志、不进工具输出；下次搜索立即生效，无需重启。
+**方式一（推荐）：设置页。** 重启后打开 **设置 → 知乎全网搜索**，粘贴 Access Secret 并保存。密钥进入本插件自己的存储
+（`<DSH_HOME>/storages/dsh-zhihu-global-search/secret.json`，页面底部会显示实际路径），不写入任何 `cordis.patch.yml`、
+不写入 `~/.dsh/.credentials.yaml`、不进日志、不进工具输出；下次搜索立即生效，无需重启。
+
+若要彻底清除：点「移除」，或直接删除该目录。
 
 - 输入框始终是空的：它只显示"已配置（来源：…）"或"尚未配置"。
 - 若该密钥来自环境变量，输入框只读并注明来源；要在这里修改，先取消环境变量再重启。
@@ -92,7 +99,7 @@ Access Secret 在 <https://developer.zhihu.com> 申请。`accessSecretEnv` 只�
 ## 开发与自测
 
 ```bash
-pnpm test                 # 离线单测（fetch 替身，不联网）
+pnpm test                 # 离线单测（fetch 替身 + 真实 React 渲染设置页，不联网）
 pnpm run check            # 隔离 DSH_HOME 启动 headless 宿主，断言工具已注册
 pnpm run check:installed  # 追加校验安装副本文件集
 pnpm run dev:boot         # 隔离 dsh web（OS 分配端口、不打开浏览器），人工看设置页

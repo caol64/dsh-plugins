@@ -39,6 +39,35 @@ test("the patch registers exactly one row named after the package", () => {
     assert.ok(!/^\s+command: /mu.test(patch), "the bundle must not pin a machine-specific mdcli path");
 });
 
+/**
+ * Plugin Manager reads `meta.title` / `meta.description` from exported locale
+ * JSON without activating the bundle. That text is display-only: the model never
+ * sees it, so it may be longer and more salesy than the tool description and
+ * must not be conflated with it.
+ */
+test("display metadata ships as exported locale JSON with an icon", async () => {
+    assert.ok(manifest.exports["./locale/*.json"], "locale files must be exported for Plugin Manager");
+    assert.ok(manifest.exports["./icon"], "the icon must be exported as ./icon");
+    assert.ok(manifest.files.includes("locale/*.json"), "locale files must ship in the tarball");
+    assert.ok(manifest.files.includes("icon.svg"), "the icon must ship in the tarball");
+
+    for (const language of ["en", "zh"]) {
+        const raw = await readFile(new URL(`locale/${language}.json`, root), "utf8");
+        const { meta } = JSON.parse(raw);
+        assert.ok(meta?.title?.trim(), `${language}.json needs meta.title`);
+        assert.ok(meta?.description?.trim(), `${language}.json needs meta.description`);
+        assert.equal(meta.detail, undefined, "no detail document is declared, so the README stays the fallback");
+    }
+
+    const zh = JSON.parse(await readFile(new URL("locale/zh.json", root), "utf8"));
+    assert.match(zh.meta.title, /墨探/u, "the Chinese row keeps the product name the user recognizes");
+    // Model-facing wording belongs in the tool declaration, not here: no
+    // parameter plumbing and no routing instructions aimed at the model.
+    assert.doesNotMatch(zh.meta.description, /max_tokens|raw_html|no_verify_ssl|truncate/u, "no parameter internals");
+    assert.doesNotMatch(zh.meta.description, /you must|must call|do not call/ui, "no model instructions");
+    assert.ok(!/[<>&]/u.test(zh.meta.description), "display copy is plain text, not markup");
+});
+
 test("peer dependencies are host-provided and match the shipped runtime", () => {
     for (const name of ["@deepseek-ai/cordis", "@deepseek-ai/dsh-agent", "@deepseek-ai/dsh-tools"]) {
         assert.ok(manifest.peerDependencies?.[name], `missing peer ${name}`);

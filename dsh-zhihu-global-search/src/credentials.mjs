@@ -1,28 +1,28 @@
 /**
  * Secret resolution for the Zhihu Access Secret.
  *
- * The harness rule is "configuration carries references, never values". This
- * module enforces it for this plugin:
- *  - the only configuration key is `accessSecretEnv`, a POSIX reference name;
- *  - the value is resolved through `ctx.credentials` (provider-managed store,
- *    then ambient fallbacks such as the process environment) on EVERY call, so
- *    a secret saved from the settings page reaches the next search without a
- *    restart;
- *  - when no credential service is mounted, the process environment is read
- *    directly, which is the same fallback the service documents.
+ * The harness rule is "configuration carries references, never values", and this
+ * plugin extends it: the secret lives in THIS plugin's own store
+ * (`src/secret-store.mjs`), not in the machine-wide credential document. See
+ * `docs/DEVELOPMENT-LOG.md` §4.14 for why.
  *
- * Nothing in this module puts the value into a returned object, a log line, or
- * an error message: callers receive the secret only to build a request header.
+ * Resolution order, per call (never cached, so a save reaches the next search):
+ *  1. the plugin's own store — writable, the only thing the settings page edits;
+ *  2. the environment variable named by `accessSecretEnv` — read-only fallback
+ *     for CI and one-off runs.
+ *
+ * Nothing here puts the value into a returned view, a log line, or an error
+ * message: callers receive the secret only to build a request header.
  */
 
-/** Default reference name; the settings page writes to this name. */
+/** Default reference name of the environment fallback. */
 export const DEFAULT_SECRET_REF = "ZHIHU_ACCESS_SECRET";
 
-/** A POSIX shell identifier, the grammar of a credential reference. */
+/** A POSIX shell identifier. */
 const REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
 /**
- * Whether a string can name a credential reference.
+ * Whether a string can name an environment variable.
  * @param {string} value - candidate.
  * @returns {boolean} true when the name is a POSIX identifier.
  */
@@ -42,8 +42,8 @@ export function assertNoLiteralSecret(raw, allowed) {
         if (/secret|token|api.?key|password/iu.test(key)) {
             throw new Error(
                 `zhihu-global-search: config "${key}" is not supported — secrets never go in configuration. ` +
-                    "Open Settings → Zhihu global search and save the Access Secret there (it is stored in the " +
-                    "harness credential store), or export the environment variable named by accessSecretEnv.",
+                    "Open Settings → Zhihu global search and save the Access Secret there (it is stored in this " +
+                    "plugin's own store), or export the environment variable named by accessSecretEnv.",
             );
         }
         throw new Error(`zhihu-global-search: unknown config key "${key}" (expected: ${allowed.join(", ")})`);
@@ -51,8 +51,8 @@ export function assertNoLiteralSecret(raw, allowed) {
 }
 
 /**
- * Read the process environment as the ambient fallback layer.
- * @param {string} ref - reference name.
+ * Read the process environment as the fallback layer.
+ * @param {string} ref - variable name.
  * @returns {string | undefined} the value when non-empty.
  */
 export function fromEnvironment(ref) {
@@ -62,22 +62,26 @@ export function fromEnvironment(ref) {
 
 /**
  * Build the per-call secret resolver used by the search pipeline.
- * @param {{ credentials?: { resolve: (ref: string) => Promise<{ value: string, source: string } | undefined> } | undefined,
- *   ref: string }} options - credential service (optional) and reference name.
+ * @param {{ store?: { read: () => Promise<string | undefined> } | undefined,
+ *   ref: string }} options - the plugin's own store (optional) and the env fallback name.
  * @returns {{ resolve: () => Promise<{ value: string, source: string } | undefined> }} resolver.
  */
-export function createSecretResolver({ credentials, ref }) {
+export function createSecretResolver({ store, ref }) {
     return {
         async resolve() {
-            if (credentials && typeof credentials.resolve === "function") {
+            if (store && typeof store.read === "function") {
                 try {
-                    const hit = await credentials.resolve(ref);
-                    if (hit && typeof hit.value === "string" && hit.value.trim() !== "") {
-                        return { value: hit.value.trim(), source: hit.source ?? "credentials" };
+                    const stored = await store.read();
+                    if (typeof stored === "string" && stored.trim() !== "") {
+                        return { value: stored.trim(), source: "plugin" };
                     }
-                } catch {
-                    // A provider failure must not take the tool down; fall through
-                    // to the ambient layer, exactly like a missing reference.
+                } catch (error) {
+                    // A broken store must not be silently skipped: the user would
+                    // otherwise see "not configured" while a secret file exists.
+                    throw new Error(
+                        `读取插件存储失败：${error?.message ?? String(error)}。` +
+                            "请检查 Settings → 知乎全网搜索 的提示，修复或删除该存储文件后重试。",
+                    );
                 }
             }
             const ambient = fromEnvironment(ref);

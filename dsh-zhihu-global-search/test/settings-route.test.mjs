@@ -163,18 +163,21 @@ test("a missing credential store answers 503 so the page can explain it", async 
     assert.equal(response.status, 503);
 });
 
-test("createSettingsRoute binds the credential controller and pre-binds the reference", async () => {
-    const calls = [];
-    const controller = {
-        describe: async (refs) => ({ [refs[0]]: { configured: false, writable: true } }),
-        set: async (ref, value) => calls.push(["set", ref, value]),
-        unset: async (ref) => calls.push(["unset", ref]),
-    };
+test("the route writes into this plugin's own store and reports its location", async (t) => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const { createSecretStore } = await import("../src/secret-store.mjs");
+
+    const root = await mkdtemp(path.join(tmpdir(), "zgs-route-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const dir = path.join(root, "store");
+    const store = createSecretStore({ dir });
+    // A host context that is hostile to property access: the route must need no
+    // service beyond a logger, so a real Cordis "without inject" throw on every
+    // key cannot disable the page (that is what broke earlier versions).
     const ctx = new Proxy(
-        {
-            credentialsController: controller,
-            logger: { info: () => {}, warn: () => {} },
-        },
+        { logger: { info: () => {}, warn: () => {} } },
         {
             get(object, key) {
                 if (typeof key === "string" && key in object) return Reflect.get(object, key);
@@ -182,11 +185,22 @@ test("createSettingsRoute binds the credential controller and pre-binds the refe
             },
         },
     );
-    const handler = createSettingsRoute({ ctx, ref: "ZHIHU_TEAM_SECRET" });
-    const saved = await (await handler(post('{"op":"save","value":"v1"}'))).json();
-    assert.deepEqual(calls[0], ["set", "ZHIHU_TEAM_SECRET", "v1"]);
+    const handler = createSettingsRoute({ ctx, store, ref: "ZHIHU_ACCESS_SECRET" });
+    const secret = "zhihu-hidden-value";
+    const saved = await (await handler(post(JSON.stringify({ op: "save", value: secret })))).json();
     assert.equal(saved.ok, true);
-    // The request cannot name a reference; the bound one always wins.
-    await handler(post('{"op":"save","value":"v2","ref":"OTHER_PLUGIN_SECRET"}'));
-    assert.deepEqual(calls[1], ["set", "ZHIHU_TEAM_SECRET", "v2"]);
+    assert.equal(saved.store, "plugin");
+    assert.equal(saved.configured, true);
+    assert.equal(saved.location, dir);
+    // Every field but the value: nothing in the view may carry the secret.
+    for (const value of Object.values(saved)) assert.notEqual(value, secret);
+    assert.equal(await store.read(), secret);
+
+    // The request cannot choose the environment fallback name either.
+    await handler(post(JSON.stringify({ op: "save", value: "second-value", ref: "OTHER_PLUGIN_SECRET" })));
+    assert.equal(await store.read(), "second-value");
+
+    const cleared = await (await handler(post('{"op":"clear"}'))).json();
+    assert.equal(cleared.configured, false);
+    assert.equal(await store.read(), undefined);
 });

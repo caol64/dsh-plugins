@@ -4,10 +4,13 @@
 # `zhihu_global_search` native tool, and (on the web client) the settings page
 # under Settings → Zhihu global search.
 #
-# Credentials are never part of this row. The Access Secret lives in the
-# harness credential store under the reference named by `accessSecretEnv`
-# (default `ZHIHU_ACCESS_SECRET`); the settings page writes it through
-# `ctx.remote.credentials`, and the process environment is the fallback layer.
+# Credentials are never part of this row. The Access Secret lives in THIS
+# plugin's own store, `<DSH_HOME>/storages/dsh-zhihu-global-search/secret.json`
+# (directory 0700, file 0600, atomic writes), which the settings page writes and
+# nothing else reads. The machine-wide `.credentials.yaml` is never touched, so
+# removing this plugin's store directory removes the secret with it.
+# `accessSecretEnv` (default `ZHIHU_ACCESS_SECRET`) names an OPTIONAL read-only
+# fallback: a stored value always wins over it.
 # A row that carries a literal secret key is rejected at activation.
 #
 # Every config key has a default and can be omitted. Override values in the
@@ -16,7 +19,10 @@
 #
 #   - id: zhihu-global-search
 #     config:
-#       accessSecretEnv: ZHIHU_TEAM_SECRET
+#       secretStoreDir: /absolute/path/to/store
+#
+# `secretStoreDir` is optional; leave it out to use the default above. Point it
+# elsewhere only when one machine runs several isolated instances.
 #
 # Do not restate the whole config there: the config object is replaced, not
 # merged, so a partial row silently resets the other keys to their defaults.

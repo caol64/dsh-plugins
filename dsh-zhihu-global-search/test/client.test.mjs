@@ -24,20 +24,132 @@ const SOURCE = readFileSync(path.join(ROOT, "client.js"), "utf8");
 const BOOT_TIMEOUT_MS = 200;
 
 /**
+ * A locale service shaped exactly like the shipped one (LocaleFace).
+ * @param {string} id - the active language id.
+ * @returns {object} the stub.
+ */
+function realLocaleService(id) {
+    return {
+        getSnapshot: () => ({ id, locales: [id], revision: 0 }),
+        subscribe: () => () => {},
+        register: () => () => {},
+    };
+}
+
+/**
+ * A service that throws on any unknown property, like a real Cordis service
+ * object (whose service proxy rejects missing members).
+ * @param {object} members - the implemented members.
+ * @returns {Proxy} the strict service.
+ */
+function strictService(members) {
+    return new Proxy(members, {
+        get(object, property) {
+            if (property in object) return object[property];
+            if (typeof property !== "string") return undefined;
+            throw new TypeError(`this.locale.${property} is not a function`);
+        },
+    });
+}
+
+/**
+ * The React stand-in handed to the factory.
+ *
+ * Hooks are GLOBAL slots, exactly like React's dispatcher: `Component()` runs
+ * outside the current call stack, so a per-render closure would be lost. Each
+ * render test resets the slots synchronously before calling the component.
+ */
+
+const hooks = {
+    /** @type {Array<{ value: unknown }>} */
+    cells: [],
+    index: 0,
+    /** @type {Function[]} */
+    pending: [],
+    /**
+     * Start a fresh render pass. The hook cells persist (a re-render keeps its
+     * state); only the index and the effect queue restart, like a React mount.
+     */
+    startPass() {
+        this.index = 0;
+        this.pending = [];
+    },
+    /** Forget every cell: a different component instance (the preview render). */
+    newInstance() {
+        this.cells = [];
+        this.startPass();
+    },
+    useState(initial) {
+        const cell = (this.cells[this.index] ??= { value: typeof initial === "function" ? initial() : initial });
+        this.index += 1;
+        return [
+            cell.value,
+            (next) => {
+                cell.value = typeof next === "function" ? next(cell.value) : next;
+            },
+        ];
+    },
+    useEffect(effect) {
+        this.pending.push(effect);
+        this.index += 1;
+    },
+    useRef(initial) {
+        const cell = (this.cells[this.index] ??= { value: { current: initial } });
+        this.index += 1;
+        return cell.value;
+    },
+    useCallback(callback) {
+        this.index += 1;
+        return callback;
+    },
+    /** Run the effects queued by the last render. */
+    runEffects() {
+        for (const effect of this.pending.splice(0)) effect();
+    },
+};
+
+/**
+ * A minimal class-component base, like `React.Component`: framework code that
+ * uses an error boundary needs it, and a stub without it is not React-shaped.
+ */
+class ShimComponent {
+    constructor(props) {
+        this.props = props;
+    }
+}
+
+const ReactShim = {
+    Component: ShimComponent,
+    createElement: (type, props, ...children) => {
+        // Render function components eagerly; a class component is rendered
+        // through `render()`, which is what React itself does.
+        if (typeof type === "function") {
+            if (type.prototype?.isReactComponent === undefined && type.prototype?.render === undefined) return type(props);
+            const instance = new type(props);
+            instance.props = props;
+            return type.prototype.render.call(instance);
+        }
+        return { type, props: { ...props, children } };
+    },
+    useState: (initial) => hooks.useState(initial),
+    useEffect: (effect) => hooks.useEffect(effect),
+    useRef: (initial) => hooks.useRef(initial),
+    useCallback: (callback) => hooks.useCallback(callback),
+};
+
+/**
  * Run the client factory with the given `require` and a minimal host.
  * @param {(spec: string) => unknown} require - the module resolver.
  * @param {{ locale?: object }} [options] - service overrides.
- * @returns {{ ctx: object, registered: object[], registry: object }} the fake host.
+ * @returns {{ ctx: object, registered: { options: object, Component: Function }[], registry: object }} the fake host.
  */
 function bootClient(requireFn, options = {}) {
     const registration = capturedRegistration(SOURCE);
     const registered = [];
     const styles = [];
-    const locale = options.locale ?? {
-        getLocale: () => ({ id: "zh-CN" }),
-        subscribe: () => () => {},
-        register: () => () => {},
-    };
+    // The real service is the slot system's LocaleFace: `getSnapshot()` +
+    // `subscribe()` + `register()`. It has NO `getLocale()`.
+    const locale = options.locale ?? realLocaleService("zh-CN");
     const ctx = {
         inject: ["slots", "locale"],
         get: (key) => (key === "locale" ? locale : undefined),
@@ -67,9 +179,16 @@ function bootClient(requireFn, options = {}) {
         querySelectorAll: () => [],
     };
     try {
-        const instance = registration.factory(requireFn);
+        const instance = registration.factory((spec) => (spec === "react" ? ReactShim : requireFn(spec)));
         instance.inject = instance.inject ?? ctx.inject;
         instance.apply(ctx);
+        // The shell renders the registered component; a component that throws
+        // blanks the section without failing registration, so render it here.
+        // The registered component is NOT rendered here: the hand-written hook
+        // stub is more permissive than React (it happily renders a returned
+        // function, which React refuses), so rendering proofs live in
+        // test/client-render.test.mjs with real react-dom. This file asserts the
+        // registration contract only.
     } finally {
         if (previousDocument === undefined) delete globalThis.document;
         else globalThis.document = previousDocument;
@@ -109,14 +228,41 @@ test("the factory loads with only the platform seeds available", () => {
 });
 
 test("the locale service is a service (injected), so the label follows the app language", () => {
-    const english = { getLocale: () => ({ id: "en-US" }), subscribe: () => () => {}, register: () => () => {} };
-    const { registered } = bootClient(seedRequire(PLATFORM_SEEDS), { locale: english });
+    const { registered } = bootClient(seedRequire(PLATFORM_SEEDS, { react: ReactShim }), { locale: realLocaleService("en") });
+    assert.equal(registered[0].options.label(), "Zhihu global search");
+});
+
+test("the label survives a locale service whose snapshot changes between reads", () => {
+    let active = "zh-CN";
+    const locale = strictService({
+        getSnapshot: () => ({ id: active, locales: ["zh-CN", "en"], revision: active === "zh-CN" ? 0 : 1 }),
+        subscribe: (listener) => {
+            listeners.push(listener);
+            return () => {};
+        },
+        register: () => () => {},
+    });
+    const listeners = [];
+    const { registered } = bootClient(seedRequire(PLATFORM_SEEDS, { react: ReactShim }), { locale });
+    assert.equal(registered[0].options.label(), "知乎全网搜索");
+    active = "en";
+    for (const listener of listeners) listener();
     assert.equal(registered[0].options.label(), "Zhihu global search");
 });
 
 test("a host without the locale service still mounts the page", () => {
-    const { registered } = bootClient(seedRequire(PLATFORM_SEEDS), { locale: {} });
+    // `{}` is what an older host without `locale` behaves like: no members.
+    const { registered } = bootClient(seedRequire(PLATFORM_SEEDS, { react: ReactShim }), { locale: {} });
     assert.equal(registered.length, 1);
+    assert.equal(registered[0].options.label(), "知乎全网搜索");
+});
+
+test("a strict service without getLocale does not break the label", () => {
+    // The regression: calling a member the service does not have throws, and the
+    // shell drops the whole section. The label must never reach for one.
+    const { registered } = bootClient(seedRequire(PLATFORM_SEEDS, { react: ReactShim }), {
+        locale: strictService(realLocaleService("zh-CN")),
+    });
     assert.equal(registered[0].options.label(), "知乎全网搜索");
 });
 

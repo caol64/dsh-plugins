@@ -16,6 +16,8 @@ src/run.mjs          参数数组组装、spawn、超时、取消、stderr 解�
 src/errors.mjs       失败文本 → 分类 + 是否重试 + 可行动文案
 src/setup.mjs        缺失时自动安装 mdcli（pipx→uv→pip）与 Chromium
 src/tool.mjs         工具描述、value DSL 的参数与输出 schema、中英文文案
+locale/{en,zh}.json  插件列表页的显示名与简介（meta.title / meta.description），不进模型上下文
+icon.svg             插件列表页图标（按真实渲染器 resvg 出图核对，尺寸 36×36 viewBox）
 scripts/dev.sh       薄壳：把参数转给仓库根的共享自测脚本 ../scripts/dev.sh
 docs/DEVELOPMENT-LOG.md  设计决策与全部踩坑记录（改设计前先读）
 ```
@@ -25,7 +27,7 @@ docs/DEVELOPMENT-LOG.md  设计决策与全部踩坑记录（改设计前先读�
 ## 2. 命令
 
 ```bash
-pnpm test                    # 单元测试（离线，65 个用例，fixture 模拟 mdcli）
+pnpm test                    # 单元测试（离线，66 个用例，fixture 模拟 mdcli）
 pnpm run check               # 隔离 DSH_HOME 启动真实 host，断言 md_article 已注册
 pnpm run check:installed     # 追加校验安装副本的文件集
 pnpm run dev:boot            # 隔离 dsh web（OS 分配端口、不打开浏览器），人工看 UI

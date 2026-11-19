@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Omni article",
+    "description": "Give the agent a link and it returns the clean article text: navigation, ads, and footers are stripped by the locally run 墨探 (mdcli) converter, with no third-party service involved and no extra API quota spent; JS-rendered and anti-bot pages fall back to a browser automatically. Adds the md_article tool, preferred for retrieving whole pages and falling back to web_fetch when it fails. A missing mdcli is installed automatically into an isolated Python environment on first use (disable with allowInstall)."
+  }
+}

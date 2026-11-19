@@ -29,7 +29,9 @@ window.__ModuleLoader__.load({
     id: "dsh-zhihu-global-search",
     factory(require) {
         const React = require("react");
-        const h = React.createElement;
+        // `h` follows the current runtime: the test harness swaps
+        // `React.createElement` to render the component with a hook runtime.
+        const h = (...args) => React.createElement(...args);
         const { useState, useEffect, useRef } = React;
 
         const NS = "zhihu-global-search";
@@ -53,7 +55,11 @@ window.__ModuleLoader__.load({
                 placeholderSet: "已配置；如需更换请输入新的 Access Secret",
                 stateConfigured: (source) => `已配置（来源：${sourceText(source)}）`,
                 stateUnconfigured: "尚未配置",
-                envManaged: "该密钥由环境变量提供，在此只读；如需在此修改，请先取消环境变量后重启。",
+                // The stored value always wins, so saving here is allowed even
+                // while the fallback is in effect — that is how a user replaces
+                // an exported variable without editing their shell.
+                envManaged: (ref) => `当前使用环境变量 ${ref}（只读回退）。保存新密钥后会优先使用插件存储。`,
+                storedAt: (dir) => `存储位置：${dir}`,
                 envName: (ref) => `环境变量名：${ref}`,
                 docs: "获取 Access Secret",
                 billing: "全网搜索按次计费，每日有免费额度；额度用尽后调用会失败，不会自动重试。",
@@ -68,7 +74,7 @@ window.__ModuleLoader__.load({
                 loadFailed: "无法读取密钥状态：",
                 stateUnknown: "无法读取密钥状态，暂时不能修改。",
                 empty: "请输入 Access Secret 后再保存。",
-                noStore: "当前环境没有可用的凭据存储，请改用环境变量。",
+                noStore: "当前环境没有可用的插件存储，只能用环境变量提供密钥。",
                 saveRejected: "凭据存储没有接受这次写入，请改用环境变量。",
                 unavailable: "插件未完全加载，无法保存密钥。",
             },
@@ -99,7 +105,7 @@ window.__ModuleLoader__.load({
                 loadFailed: "Could not read the credential state: ",
                 stateUnknown: "Could not read the credential state, so it cannot be changed right now.",
                 empty: "Enter an Access Secret before saving.",
-                noStore: "No credential store is available here; use an environment variable instead.",
+                noStore: "No plugin store is available here; supply the secret through an environment variable.",
                 saveRejected: "The credential store did not accept the write; use an environment variable instead.",
                 unavailable: "The plugin is not fully loaded, so the secret cannot be saved.",
             },
@@ -113,23 +119,37 @@ window.__ModuleLoader__.load({
         }
 
         /**
-         * Read the locale service the plugin declared in `inject`.
+         * The locale service the plugin declared in `inject`.
          *
          * `locale` is a Client Cordis SERVICE (`ctx.locale`), never a module: the
          * browser module table carries only platform seeds, so requiring the
          * locale as a module throws `missed the module table` and the whole
-         * client half fails to activate. A context without it (an older host)
-         * degrades to zh-CN.
+         * client half fails to activate.
+         *
+         * Its snapshot method is `getSnapshot()` (the service is the slot
+         * system's LocaleFace); `getLocale()` is NOT part of the contract, and
+         * reading a missing method on the real service object throws — which
+         * blanked this page once (see docs/DEVELOPMENT-LOG.md §4.11).
          * @param {object} ctx - client plugin context.
          * @returns {object | undefined} the service when present.
          */
         function localeService(ctx) {
             try {
                 const service = ctx.locale;
-                return typeof service?.getLocale === "function" ? service : undefined;
+                return typeof service?.getSnapshot === "function" ? service : undefined;
             } catch {
                 return undefined;
             }
+        }
+
+        /**
+         * The active language id from a locale snapshot, falling back to zh-CN.
+         * @param {{ id?: string } | undefined} snapshot - `ctx.locale.getSnapshot()`.
+         * @returns {string} a language id such as `zh-CN` or `en`.
+         */
+        function activeLocaleId(snapshot) {
+            const id = snapshot?.id;
+            return typeof id === "string" && id !== "" ? id : "zh-CN";
         }
 
         /**
@@ -218,27 +238,76 @@ window.__ModuleLoader__.load({
         }
 
         /**
+         * Wrap the page so a render failure is VISIBLE.
+         *
+         * The slot renderer catches a crashing entry and renders an empty
+         * `<div data-slot-error>` with no text, which looks exactly like "the
+         * plugin rendered nothing" (see docs/DEVELOPMENT-LOG.md §4.12). Because
+         * this plugin may not rely on any UI primitive, the guard is a plain
+         * function component: it calls the page directly, and if that throws it
+         * renders the reason instead of letting the whole section vanish.
+         */
+        function renderPageSafely(ownerProps, ctx) {
+            try {
+                // Node swallows a render throw and leaves the slot blank; this
+                // call turns that into visible text (see docs §4.12).
+                return ZhihuSearchSettings(ownerProps, ctx);
+            } catch (error) {
+                try {
+                    console.error("zhihu-global-search: settings page crashed", error);
+                } catch {
+                    /* logging is best effort */
+                }
+                const message = String(error?.message ?? error);
+                return h(
+                    "section",
+                    { className: "zgs-section", role: "alert" },
+                    h("h3", { className: "zgs-title" }, "知乎全网搜索 · 页面渲染失败"),
+                    h("p", { className: "zgs-status", "data-tone": "error" }, message),
+                    h("p", { className: "zgs-hint" }, "请把这段文字反馈给插件作者；浏览器控制台有完整堆栈。"),
+                );
+            }
+        }
+
+        /**
          * The settings page. All text comes from the locale service; the secret
          * input is uncontrolled state that is wiped after every write.
+         *
+         * `ctx` is passed by the slot registration below: the component is
+         * declared at factory scope (the shell passes no context), so relying on
+         * a closure variable here would throw a ReferenceError while rendering —
+         * registration would still succeed and the section would render blank.
+         * @param {{ close: () => void }} _owner - owner props supplied by the shell.
+         * @param {object} ctx - the client plugin context from `apply`.
          */
-        function ZhihuSearchSettings() {
+        function ZhihuSearchSettings(_owner, ctx) {
             const localeCtx = localeService(ctx);
             const [localeId, setLocaleId] = useState(() => {
+                if (!localeCtx) return "zh-CN";
                 try {
-                    return localeCtx?.getLocale?.().id ?? "zh-CN";
+                    return activeLocaleId(localeCtx.getSnapshot());
                 } catch {
                     return "zh-CN";
                 }
             });
             useEffect(() => {
-                if (!localeCtx || typeof localeCtx.subscribe !== "function") return undefined;
-                return localeCtx.subscribe(() => {
-                    try {
-                        setLocaleId(localeCtx.getLocale?.().id ?? "zh-CN");
-                    } catch {
-                        /* keep the previous locale */
+                if (!localeCtx) return undefined;
+                try {
+                    // Re-read inside the callback: a discarded component must not
+                    // touch state, and a disabled locale surface must not throw.
+                    if (typeof localeCtx.subscribe === "function") {
+                        return localeCtx.subscribe(() => {
+                            try {
+                                setLocaleId(activeLocaleId(localeCtx.getSnapshot()));
+                            } catch {
+                                /* keep the previous locale */
+                            }
+                        });
                     }
-                });
+                } catch {
+                    /* no live subscription: the initial snapshot is used */
+                }
+                return undefined;
             }, []);
 
             const text = pickText(localeId);
@@ -268,7 +337,9 @@ window.__ModuleLoader__.load({
             const ready = state.status === "ready";
             const configured = ready && state.configured === true;
             const writable = ready && state.writable === true;
-            const envManaged = configured && !writable;
+            // The environment is a read-only FALLBACK: it reports the source and
+            // explains that saving replaces it, but never blocks the input.
+            const envManaged = configured && state.source === "env";
 
             const save = async () => {
                 const value = draft.trim();
@@ -329,7 +400,18 @@ window.__ModuleLoader__.load({
                   : ready
                     ? text.stateUnconfigured
                     : "";
-            const hint = envManaged ? text.envManaged : ready && !failed ? text.envName(state.ref) : "";
+            // Diagnosability: when the Host reports no credential backend, say so
+            // instead of silently disabling the field (§4.13).
+            const noStore = ready && state.store === false;
+            const hint = envManaged
+                ? text.envManaged(state.ref)
+                : noStore
+                  ? text.noStore
+                  : ready && !failed
+                    ? text.envName(state.ref)
+                    : "";
+            // Where the value is stored, so the user can find (or delete) it.
+            const location = ready && !failed && typeof state.location === "string" ? text.storedAt(state.location) : "";
 
             return h(
                 "section",
@@ -394,6 +476,7 @@ window.__ModuleLoader__.load({
                         ),
                     ),
                     hint ? h("p", { className: "zgs-hint" }, hint) : null,
+                    location ? h("p", { className: "zgs-hint", "data-kind": "location" }, location) : null,
                     ready && state.error ? h("p", { className: "zgs-status", "data-tone": "error" }, state.error) : null,
                     notice
                         ? h("p", { className: "zgs-status", role: "status", "data-tone": notice.tone }, notice.text)
@@ -435,14 +518,24 @@ window.__ModuleLoader__.load({
                             order: 25,
                             label: () => {
                                 try {
-                                    const localeCtx = localeService(ctx);
-                                    return pickText(localeCtx?.getLocale?.().id ?? "zh-CN").nav;
+                                    const snapshot = localeService(ctx)?.getSnapshot?.();
+                                    return pickText(activeLocaleId(snapshot)).nav;
                                 } catch {
                                     return TEXT["zh-CN"].nav;
                                 }
                             },
                         },
-                        ZhihuSearchSettings,
+                        // The shell passes ONLY its owner props to the entry
+                        // component, so this wrapper must not render the page
+                        // itself: hooks declared in this scope would shift the
+                        // page's hook order. It hands back a component that
+                        // closes over this plugin's context instead.
+                        // The shell renders `Component(ownerProps)`; the page needs
+                        // this plugin's `ctx`, so the wrapper closes over it. It must
+                        // RETURN THE ELEMENT TREE, never a function: returning the
+                        // component itself makes React print "Functions are not
+                        // valid as a React child" and render nothing (§4.12).
+                        (ownerProps) => renderPageSafely(ownerProps, ctx),
                     ),
                 );
             },

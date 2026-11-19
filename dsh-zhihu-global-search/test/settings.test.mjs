@@ -1,129 +1,153 @@
+/**
+ * The settings operations, now backed by THIS plugin's own store.
+ *
+ * The operations no longer touch any host service, so these tests use a real
+ * file-backed store in a temporary directory: the behavior under test is the
+ * one the page experiences, including the environment fallback and the way a
+ * corrupt document is reported.
+ */
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test } from "node:test";
 
 const { createSettingsOperations, MAX_SECRET_CHARS, normalizeSubmittedSecret, toSettingsView } = await import(
     "../src/settings.mjs"
 );
+const { createSecretStore } = await import("../src/secret-store.mjs");
 
 const REF = "ZHIHU_ACCESS_SECRET";
 
 /**
- * A credential controller stand-in that keeps a tiny in-memory store and
- * records calls.
- * @param {{ value?: string, source?: string, writable?: boolean, failSet?: string }} [options] - store state.
+ * A real store in a fresh directory plus a controlled environment.
+ * @param {import("node:test").TestContext} t - test context, for cleanup.
+ * @param {Record<string, string>} [env] - environment values.
+ * @returns {Promise<{ store: object, env: Record<string, string>, dir: string }>} fixture.
  */
-function fakeController(options = {}) {
-    const state = { value: options.value, source: options.source, writable: options.writable ?? true };
-    const calls = [];
-    return {
-        calls,
-        state,
-        async describe(refs) {
-            calls.push(["describe", refs]);
-            const info = { configured: state.value !== undefined && state.value !== "", writable: state.writable };
-            if (info.configured) info.source = state.source ?? "credentials";
-            return { [refs[0]]: info };
-        },
-        async set(ref, value) {
-            calls.push(["set", ref, value]);
-            if (options.failSet) throw new Error(options.failSet);
-            state.value = value;
-            state.source = "credentials";
-        },
-        async unset(ref) {
-            calls.push(["unset", ref]);
-            state.value = undefined;
-        },
-    };
+async function fixture(t, env = {}) {
+    const root = await mkdtemp(path.join(tmpdir(), "zgs-settings-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const dir = path.join(root, "store");
+    return { store: createSecretStore({ dir }), env, dir };
 }
 
 test("normalizeSubmittedSecret trims, rejects blanks, multi-line values and oversized input", () => {
     assert.equal(normalizeSubmittedSecret({ value: "  abc  " }), "abc");
     assert.throws(() => normalizeSubmittedSecret({ value: "   " }), /不能为空/u);
-    assert.throws(() => normalizeSubmittedSecret({}), /不能为空/u);
+    assert.throws(() => normalizeSubmittedSecret({ value: 42 }), /不能为空/u);
+    assert.throws(() => normalizeSubmittedSecret(null), /不能为空/u);
     assert.throws(() => normalizeSubmittedSecret({ value: "a\nb" }), /换行/u);
     assert.throws(() => normalizeSubmittedSecret({ value: "x".repeat(MAX_SECRET_CHARS + 1) }), /过长/u);
 });
 
 test("toSettingsView never has a field a value could ride in", () => {
-    const view = toSettingsView(REF, { configured: true, source: "credentials", writable: true }, true);
-    assert.deepEqual(Object.keys(view).sort(), ["configured", "ref", "source", "store", "writable"]);
-    // writable requires a store; a describe result alone cannot claim it.
-    assert.equal(toSettingsView(REF, { configured: true, writable: true }, false).writable, false);
+    const view = toSettingsView(REF, { configured: true, source: "plugin", writable: true }, "plugin", "/s");
+    assert.deepEqual(Object.keys(view).sort(), ["configured", "location", "ref", "source", "store", "writable"]);
+    assert.equal(toSettingsView(REF, { configured: true, writable: true }, false).writable, true);
+    assert.equal(toSettingsView(REF, { configured: true, writable: true }, false).store, false);
 });
 
-test("settings reports an empty state as unconfigured and writable", async () => {
-    const operations = createSettingsOperations({ controller: fakeController(), ref: REF });
-    assert.deepEqual(await operations.settings(), { ref: REF, configured: false, writable: true, store: true });
+test("an empty store reports unconfigured and writable", async (t) => {
+    const { store, env, dir } = await fixture(t);
+    const operations = createSettingsOperations({ store, ref: REF, env });
+    assert.deepEqual(await operations.settings(), {
+        ref: REF,
+        configured: false,
+        writable: true,
+        store: "plugin",
+        location: dir,
+    });
 });
 
-test("save writes through the controller and reports the new state without the value", async () => {
-    const controller = fakeController();
-    const operations = createSettingsOperations({ controller, ref: REF });
-    const view = await operations.save({ value: " new-secret " });
-    assert.deepEqual(controller.calls[0], ["set", REF, "new-secret"]);
-    assert.deepEqual(view, { ref: REF, configured: true, source: "credentials", writable: true, store: true });
-    assert.equal(JSON.stringify(view).includes("new-secret"), false);
+test("save writes to the plugin's own file and the view never carries the value", async (t) => {
+    const { store, env, dir } = await fixture(t);
+    const operations = createSettingsOperations({ store, ref: REF, env });
+    const view = await operations.save({ value: "  zhihu-secret-1  " });
+    assert.deepEqual(view, {
+        ref: REF,
+        configured: true,
+        source: "plugin",
+        writable: true,
+        store: "plugin",
+        location: dir,
+    });
+    assert.equal(JSON.stringify(view).includes("zhihu-secret-1"), false);
+    // The document lives where this plugin alone owns it.
+    const document = JSON.parse(await readFile(path.join(dir, "secret.json"), "utf8"));
+    assert.equal(document.secret, "zhihu-secret-1");
+    assert.equal(await store.read(), "zhihu-secret-1");
 });
 
-test("clear removes the stored value and falls back to the environment state", async () => {
-    const controller = fakeController({ value: "stored" });
-    const operations = createSettingsOperations({ controller, ref: REF });
-    assert.deepEqual(await operations.clear(), { ref: REF, configured: false, writable: true, store: true });
-    assert.deepEqual(controller.calls[0], ["unset", REF]);
+test("clear drops the stored value and reports the resulting state", async (t) => {
+    const { store, env } = await fixture(t);
+    const operations = createSettingsOperations({ store, ref: REF, env });
+    await operations.save({ value: "value-1" });
+    const view = await operations.clear();
+    assert.equal(view.configured, false);
+    assert.equal(view.writable, true);
+    assert.equal(await store.read(), undefined);
 });
 
-test("an environment-provided secret is reported read-only", async () => {
-    const controller = fakeController({ value: "from-env", source: "env", writable: false });
-    const operations = createSettingsOperations({ controller, ref: REF });
+test("an environment-provided secret is reported, and the store still accepts a value", async (t) => {
+    const { store } = await fixture(t, { [REF]: "from-env" });
+    const operations = createSettingsOperations({ store, ref: REF, env: { [REF]: "from-env" } });
     const view = await operations.settings();
     assert.equal(view.configured, true);
     assert.equal(view.source, "env");
-    assert.equal(view.writable, false);
+    assert.equal(view.writable, true);
+    // Saving stores a value that then takes precedence over the environment.
+    const saved = await operations.save({ value: "from-store" });
+    assert.equal(saved.source, "plugin");
+    assert.equal(await store.read(), "from-store");
 });
 
-test("a provider refusal is surfaced with the value redacted", async () => {
-    const controller = fakeController({ failSet: "refused value hunter2 for ZHIHU_ACCESS_SECRET" });
-    const operations = createSettingsOperations({ controller, ref: REF });
-    await assert.rejects(operations.save({ value: "hunter2" }), (error) => {
-        assert.match(error.message, /refused value \*\*\*/u);
-        assert.equal(error.message.includes("hunter2"), false);
+test("the stored value wins over the environment", async (t) => {
+    const { store } = await fixture(t);
+    const operations = createSettingsOperations({ store, ref: REF, env: { [REF]: "from-env" } });
+    await operations.save({ value: "from-store" });
+    assert.equal((await operations.settings()).source, "plugin");
+});
+
+test("a write refusal is surfaced with the value redacted", async (t) => {
+    const { dir } = await fixture(t);
+    // A store whose write fails while naming the submitted value.
+    const hostile = {
+        directory: dir,
+        describe: async () => ({ configured: false, writable: true }),
+        write: async (value) => {
+            throw new Error(`refused value ${value} for ${REF}`);
+        },
+        clear: async () => {},
+    };
+    const operations = createSettingsOperations({ store: hostile, ref: REF, env: {} });
+    await assert.rejects(() => operations.save({ value: "hunter2" }), (error) => {
+        assert.match(error.message, /refused value/u);
+        assert.equal(error.message.includes("hunter2"), false, "the value leaked into the error");
         return true;
     });
 });
 
-test("a describe failure degrades to an unconfigured view instead of throwing", async () => {
-    const controller = {
-        async describe() {
-            throw new Error("offline");
-        },
-        async set() {},
-        async unset() {},
-    };
-    const warnings = [];
-    const operations = createSettingsOperations({
-        controller,
-        ref: REF,
-        logger: { warn: (...args) => warnings.push(args.join(" ")) },
-    });
-    // A failed read is reported as unknown, distinguishable from "not configured".
-    assert.deepEqual(await operations.settings(), {
-        ref: REF,
-        configured: false,
-        writable: false,
-        store: true,
-        failed: true,
-    });
-    assert.equal(warnings.length, 1);
+test("a corrupt store shows failed:true instead of claiming nothing is stored", async (t) => {
+    const { store, env, dir } = await fixture(t);
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFile(path.join(dir, "secret.json"), "{ broken", { mode: 0o600 });
+    const operations = createSettingsOperations({ store, ref: REF, env });
+    const view = await operations.settings();
+    assert.equal(view.failed, true);
+    assert.equal(view.configured, false);
 });
 
-test("without a credential controller every operation still answers", async () => {
-    const operations = createSettingsOperations({ ref: REF });
-    assert.deepEqual(await operations.settings(), { ref: REF, configured: false, writable: false, store: false });
-    await assert.rejects(operations.save({ value: "x" }), /没有可用的凭据存储/u);
-    assert.deepEqual(await operations.clear(), { ref: REF, configured: false, writable: false, store: false });
+test("without a store every operation still answers, preferring the environment message", async (t) => {
+    const operations = createSettingsOperations({ store: undefined, ref: REF, env: { [REF]: "from-env" } });
+    const view = await operations.settings();
+    assert.deepEqual(view, { ref: REF, configured: true, source: "env", writable: false, store: false });
+    await assert.rejects(() => operations.save({ value: "x" }), /没有可用的插件存储/u);
+    await assert.rejects(() => operations.clear(), /没有可用的插件存储/u);
 });
 
-test("a reference outside the credential grammar is refused at construction", () => {
-    assert.throws(() => createSettingsOperations({ ref: "has-dash" }), /不支持的凭据引用名/u);
+test("an environment name outside the POSIX grammar is refused at construction", () => {
+    assert.throws(() => createSettingsOperations({ store: undefined, ref: "bad-name" }), /不支持的环境变量名/u);
+    assert.throws(() => createSettingsOperations({ store: undefined, ref: "" }), /不支持的环境变量名/u);
 });

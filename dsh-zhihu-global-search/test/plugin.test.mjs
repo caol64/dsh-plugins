@@ -82,11 +82,14 @@ test("inject lists only the required service", () => {
 });
 
 test("resolveConfig applies defaults and validates every value", () => {
-    assert.deepEqual(resolveConfig(), {
-        accessSecretEnv: "ZHIHU_ACCESS_SECRET",
-        baseURL: "https://developer.zhihu.com",
-        timeoutMs: 30_000,
-    });
+    // `secretStoreDir` defaults to this plugin's own directory under the harness
+    // storage root: `<DSH_HOME>/storages/dsh-zhihu-global-search`.
+    const defaults = resolveConfig();
+    assert.equal(defaults.accessSecretEnv, "ZHIHU_ACCESS_SECRET");
+    assert.equal(defaults.baseURL, "https://developer.zhihu.com");
+    assert.equal(defaults.timeoutMs, 30_000);
+    assert.match(defaults.secretStoreDir, /storages[\\/]dsh-zhihu-global-search$/u);
+    assert.deepEqual(Object.keys(defaults).sort(), ["accessSecretEnv", "baseURL", "secretStoreDir", "timeoutMs"]);
     assert.equal(resolveConfig({ accessSecretEnv: " ZHIHU_TEAM " }).accessSecretEnv, "ZHIHU_TEAM");
     assert.equal(resolveConfig({ baseURL: "https://gw.example.com/" }).baseURL, "https://gw.example.com");
     assert.equal(resolveConfig({ timeoutMs: 5_000 }).timeoutMs, 5_000);
@@ -136,8 +139,15 @@ test("apply survives a context that lacks every optional service", async () => {
 });
 
 test("execution without a secret reports the settings page and never calls the network", async () => {
+    // Isolation matters: with the DEFAULT store directory this test reads the
+    // developer's real ~/.dsh store, finds a real secret, and hits the network.
+    // Every test that runs the tool must point `secretStoreDir` at a temp dir.
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const emptyDir = await mkdtemp(path.join(tmpdir(), "zgs-empty-"));
     const { ctx, record } = fakeContext();
-    await apply(ctx, {});
+    await apply(ctx, { secretStoreDir: emptyDir });
     const tool = record.tools[0];
     const originalFetch = globalThis.fetch;
     let called = false;
@@ -154,21 +164,20 @@ test("execution without a secret reports the settings page and never calls the n
         globalThis.fetch = originalFetch;
     }
     assert.equal(called, false);
+    await rm(emptyDir, { recursive: true, force: true });
 });
 
-test("a configured secret from the credential service reaches the request", async () => {
+test("a secret saved into this plugin's own store reaches the request", async () => {
     const calls = [];
-    const { ctx, record } = fakeContext({
-        // The plugin reads `credentials` through the optional guard on its OWN
-        // context, so it must be injected here (as the real profile does).
-        inject: ["tools", "credentials"],
-        services: {
-            credentials: {
-                resolve: async (ref) => (ref === "ZHIHU_ACCESS_SECRET" ? { value: "s3cret", source: "credentials" } : undefined),
-            },
-        },
-    });
-    await apply(ctx, {});
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const { createSecretStore } = await import("../src/secret-store.mjs");
+    const dir = await mkdtemp(path.join(tmpdir(), "zgs-plugin-"));
+    const store = createSecretStore({ dir });
+    await store.write("s3cret");
+    const { ctx, record } = fakeContext({ inject: ["tools"] });
+    await apply(ctx, { secretStoreDir: dir });
     const tool = record.tools[0];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async (url, init) => {
@@ -183,6 +192,7 @@ test("a configured secret from the credential service reaches the request", asyn
         assert.deepEqual(output.warnings, []);
     } finally {
         globalThis.fetch = originalFetch;
+        await rm(dir, { recursive: true, force: true });
     }
     assert.equal(calls.length, 1);
     assert.equal(calls[0].init.headers.Authorization, "Bearer s3cret");
@@ -196,7 +206,9 @@ test("presentCall and presentResult never throw and never leak a payload", async
     assert.deepEqual(tool.presentCall({ query: "知乎 搜索" }), {
         card: "generic",
         kind: "search",
-        title: "Zhihu global search · 知乎 搜索",
+        // `i18n` is now really reachable through ctx.get, so the zh-CN table
+        // applies (before the guard fix, this silently fell back to English).
+        title: "知乎全网搜索 · 知乎 搜索",
     });
     assert.doesNotThrow(() => tool.presentCall(undefined));
     assert.equal(tool.presentResult({}, { isError: false }), undefined);
@@ -217,21 +229,19 @@ test("unloading the plugin disposes the tool registration", async () => {
     assert.equal(DEFAULTS.accessSecretEnv, "ZHIHU_ACCESS_SECRET");
 });
 
-test("the settings route is mounted on the connection carrier with the bound reference", async () => {
-    const calls = [];
-    const controller = {
-        describe: async (refs) => ({ [refs[0]]: { configured: false, writable: true } }),
-        set: async (ref, value) => calls.push(["set", ref, value]),
-        unset: async (ref) => calls.push(["unset", ref]),
-    };
+test("the settings route is mounted on the connection carrier and writes the plugin store", async () => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const path = await import("node:path");
+    const { createSecretStore } = await import("../src/secret-store.mjs");
+    const dir = await mkdtemp(path.join(tmpdir(), "zgs-mount-"));
+    const store = createSecretStore({ dir });
     const routes = [];
     const { ctx, record } = fakeContext({
-        // `credentialsController` is read from the PLUGIN context through the
-        // optional guard, so it must be visible there; `connection` only through
-        // ctx.inject.
-        inject: ["tools", "credentialsController"],
+        // `connection` is requested through ctx.inject only; the route needs no
+        // other host service, which is what makes it immune to composition.
+        inject: ["tools"],
         services: {
-            credentialsController: controller,
             connection: {
                 fetch: {
                     register: (route) => {
@@ -242,7 +252,7 @@ test("the settings route is mounted on the connection carrier with the bound ref
             },
         },
     });
-    await apply(ctx, {});
+    await apply(ctx, { secretStoreDir: dir });
 
     // `connection` is requested through ctx.inject, never listed in `inject`.
     assert.deepEqual(record.injectedDeps, [["connection"]]);
@@ -257,9 +267,12 @@ test("the settings route is mounted on the connection carrier with the bound ref
         body: JSON.stringify({ op: "save", value: "value-1" }),
     }));
     assert.equal(response.status, 200);
-    assert.equal((await response.json()).ok, true);
-    // The request never names a reference: the config's bound one wins.
-    assert.deepEqual(calls[0], ["set", "ZHIHU_ACCESS_SECRET", "value-1"]);
+    const view = await response.json();
+    assert.equal(view.ok, true);
+    assert.equal(view.store, "plugin");
+    // The value reached this plugin's own store, and nowhere else.
+    assert.equal(await store.read(), "value-1");
+    await rm(dir, { recursive: true, force: true });
 });
 
 test("a host without a connection carrier keeps the tool working", async () => {
@@ -270,13 +283,15 @@ test("a host without a connection carrier keeps the tool working", async () => {
     assert.equal(record.warnings.length, 0);
 });
 
-test("mountSettingsRoute pre-binds a custom reference and is a no-op without a carrier", () => {
+test("mountSettingsRoute mounts one route per carrier and needs no credential service", () => {
     const routes = [];
     const { ctx } = fakeContext({
         services: {
             connection: { fetch: { register: (route) => (routes.push(route), async () => {}) } },
         },
     });
-    mountSettingsRoute(ctx, "ZHIHU_TEAM_SECRET");
+    mountSettingsRoute(ctx, { store: undefined, ref: "ZHIHU_TEAM_SECRET" });
     assert.equal(routes.length, 1);
+    // A host with no carrier simply has no route; activation must not fail.
+    assert.doesNotThrow(() => mountSettingsRoute(fakeContext().ctx, { store: undefined, ref: "ZHIHU_TEAM_SECRET" }));
 });

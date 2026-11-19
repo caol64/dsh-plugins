@@ -286,9 +286,263 @@ react, react/jsx-runtime, react-dom, react-dom/client, @deepseek-ai/cordis, zod,
 且用带浏览器会话的请求取 `plugins/??dsh-zhihu-global-search/client.js` 返回 200 与完整源码；
 factory 在种子表里的执行由单测覆盖。**未覆盖**：浏览器内的 React 渲染与真实点击保存（需要用户重启后确认）。
 
+### 4.11 设置页一片空白：组件渲染时抛 ReferenceError，注册却"成功"
+
+**现象**：修好 `require("host")` 之后 `web boot` 不再报错，条目也注册了，但打开 **设置 → 知乎全网搜索**
+只有一片空白。
+
+**根因（两个，叠加在同一个组件上）**：
+
+1. **`ZhihuSearchSettings` 在 factory 词法里，`apply()` 里是另一个 `ctx`**。组件引用的 `ctx` 在它的作用域里
+   根本不存在 → 首帧渲染抛 `ReferenceError: ctx is not defined`。
+2. **locale 服务的方法名是 `getSnapshot()`，不是 `getLocale()`**。该服务是 slot 系统的 `LocaleFace`
+   （`getSnapshot`/`subscribe`/`register`），读一个不存在的方法会抛 `TypeError`。而宿主一侧的
+   `settings.section` 壳子读取 `label()` 时也会走同一条错误路径。
+
+两种情况都**不会让注册失败**：`ctx.slots.register()` 成功，只是组件一渲染就抛，壳子把该区渲染成空白。
+这正是"注册成功 ≠ 页面能显示"的典型。
+
+**为什么没被测到**：上一轮的 client 测试只验证"factory 能加载、注册了一个 slot"，从未**渲染**组件；
+而 locale 替身被写成了 `{ getLocale() }`——替身照着错误代码的形状造，当然测不出错。
+
+**修复**：
+
+- 组件改为 `ZhihuSearchSettings(ownerProps, ctx)`，注册时用一个**不渲染 hooks 的包装**把 `apply` 的
+  `ctx` 闭包进去：`() => (ownerProps) => ZhihuSearchSettings(ownerProps, ctx)`。
+  - 注意包装本身**不能**调用 `React.createElement`：它也要走一遍 hooks 分派，会把页面组件的 hook 索引错位。
+    第一版就踩了这个（`page` 组件拿到的 `state` 是 `undefined`）。
+- locale 统一走 `localeService(ctx)` → `ctx.locale.getSnapshot()`，并用 `activeLocaleId()` 兜底 `zh-CN`。
+
+**守护**：`test/client.test.mjs` 新增了一个**最小渲染器**（全局 hook 槽位，仿 React 的 dispatcher），
+`bootClient` 现在会真正调用 `Component(ownerProps)`：
+
+- "rendering the page produces the actual form, not an empty section"——断言渲染文本含标题、`Access Secret`、
+  保存/移除按钮，且密码框为空、表单 onSubmit 是函数；
+- "the page falls back to English …"——英文 locale 下渲染英文；
+- locale 替身改为**真实形状** `realLocaleService()`（`getSnapshot`/`subscribe`/`register`，**没有** `getLocale`），
+  再加一个 `strictService()` 代理：读不存在的成员就像真服务一样抛错。
+
+**故障注入（都已实测）**：
+
+- 把 `getLocale()` 调用与宽松的 `localeService` 放回去 → 2 条 locale 用例变红；
+- 让组件在渲染时直接 `throw` → 7 条渲染/标签用例变红。
+
+**复盘：为什么会"修好一处、坏在另一处"**
+
+- **只验证"注册"是这类 UI bug 的通用盲区**。槽位系统对组件抛错是**静默吞掉**（控制台有
+  `slot entry crashed`），页面上只表现为空白。凡是注册 React 组件，测试就必须**渲染一次并断言文本**。
+- **替身照着我的错误代码写**，等于用错误证明错误。替身的形状要取自**已安装包的真实实现**
+  （`dsh-client-locale` 的 README/types、`ui-settings-general` 的真实注册代码）。
+- **"找不到的成员"在真实对象上会抛**。我的 `localeService` 用 `typeof service?.getSnapshot === "function"`
+  做了能力探测，但调用处却用了另一个方法名——探测和调用必须指向同一个方法。
+- **hook 顺序是很脆的东西**。任何在渲染路径上插入 `React.createElement` 的包装都会改变 hook 索引；
+  包装只应做闭包，不应自己渲染。
+
+**一个尚未闭环的点（诚实记录）**：隔离 web 宿主里 `POST /api/dsh-zhihu-global-search/settings` 能通
+（200/400/401 都符合预期），但返回 `store:false`——该 profile 里 `credentialsController` 与
+`credentials` 都没有挂到插件可见的作用域。已把控制器改为**每次操作时查找**（而不是激活时快照），
+并在真实 profile 里确认 `settings-controller` 与 `credentials`（`@deepseek-ai/dsh-credentials-local`）
+都在组合中；用户重启后若设置页显示"当前环境没有可用的凭据存储"，需要据实回报，而不是再猜一次。
+
+### 4.12 空白页的真正根因：注册项返回了"组件函数"而不是元素
+
+**现象**：4.11 的修复上线后，设置页**依然是空白**，而且连我新加的"页面渲染失败"提示都不出现。
+
+**根因（用真实 React 复现后一句话说清）**：
+
+```
+Functions are not valid as a React child. This may happen if you return Component
+instead of <Component /> from render.
+```
+
+注册时我写的是 **`() => (ownerProps) => renderPageSafely(ownerProps, ctx)`**——宿主把 `Component`
+当组件渲染，`Component(ownerProps)` 的返回值被当作**子节点**；它返回的是**函数**，React 不会去调用它，
+于是渲染出空内容。`renderPageSafely` 里的 try/catch 根本没机会执行，所以也不会有我设计的提示。
+
+**为什么前面的"修复"都看不见效果**：
+
+| 尝试 | 实际结果 |
+|---|---|
+| 组件内部 `ctx` → 闭包传入 | 是必要的修复，但组件根本没被执行 |
+| locale `getLocale()` → `getSnapshot()` | 同上，没被执行 |
+| 用函数包装捕获渲染异常 | 返回的是函数，React 不执行它 |
+| 手写 hook 替身"渲染成功" | **替身比 React 宽松**：它遇到函数就调用，于是给出了假阳性 |
+
+**这次是怎么定位的（方法本身值得记）**：
+
+1. 先确认**注册是真的**：`cordis_inspect_query` 在你的真实宿主上看到
+   `{ id: "zhihu-global-search", order: 25, active: true }`——排除"没注册"。
+2. 再确认**分发的代码是对的**：从隔离 web 宿主取 `__DSH_BOOT__` 与 `plugins/??…client.js`，
+   bundle 里 `renderPageSafely` 在、`getLocale` 只剩注释。
+3. 最后**用真实 React 渲染这份分发出去的 bundle**：装 `react` + `react-dom`，用
+   `renderToStaticMarkup` 渲染注册项，React 直接给出上面那条错误，`HTML length: 0`。
+4. 改完后同一脚本输出 `HTML length: 927` 与完整 `<section class="zgs-section">…`。
+
+**修复**：注册项**返回元素树**而不是组件函数——
+
+```js
+(ownerProps) => renderPageSafely(ownerProps, ctx)
+```
+
+**守护：`test/client-render.test.mjs`（真实 React）**
+
+- `react` / `react-dom` 只作为 **devDependencies**（插件本身仍然零运行时依赖）；
+- 用 `renderToStaticMarkup` 渲染**真实的 client.js**，断言出现标题、密码框、保存/移除、文档链接；
+- 专门断言 `Entry({ close })` 的返回值**不是函数**（就是这个 bug 的形状）；
+- 让页面抛错，断言渲染出"页面渲染失败 + 原因"；
+- **故障注入已实测**：把注册改回 `() => (ownerProps) => …`，5 条全红；还原后 5 条全绿。
+
+`test/client.test.mjs` 的手写 hook 替身**不再负责渲染证明**（它过于宽松，只保留加载/注册契约的断言），
+并在注释里写明原因。
+
+**复盘**
+
+- **"用真实的东西渲染"是 UI 插件的唯一硬证据**。过程式的 hook 替身、DOM 模拟、字符串检查，都会在你写错
+  的那一侧比真相更宽松。React 的"函数不能当子节点"这类契约，只有 React 自己会拒绝。
+- **每个"修复"都必须能被验证到用户可见的那一层**。前两轮我都只做到"注册成功 / bundle 正确"，
+  这两件事都不能推出"页面有内容"。
+- **失败要可见**。这次同时加了 `renderPageSafely`：即使以后再出错，用户也会看到原因而不是空白。
+- **一次只改一件事并立刻用最靠近现实的方式验证**：这次定位只用了四步，而前面几轮都在"猜 + 改"。
+
+### 4.13 输入框是 disabled：把"可写"判断绑在了一个看不见的服务上
+
+**现象**：页面终于显示后，Access Secret 输入框是 `disabled`，也没任何说明。
+
+**根因**：
+
+1. Host 侧用 **`ctx.credentialsController`** 判断"有没有凭据存储"。这个服务是**给浏览器用的 Remote
+   门面**（`describe(refs[])` 批量式签名），在你的真实宿主里存在，但**从插件上下文读不到**——
+   于是 `store:false` → `writable:false` → 输入框禁用。
+2. `toSettingsView` 把 `writable` 写成了 `info.writable && store`，**覆盖了 provider 自己给出的权威答案**。
+   `credential describe()` 的 `writable` 本来就告诉你"这个引用能不能写"（例如来自环境变量时是只读）。
+3. 我一度用 `describe.length >= 2` 去猜该用哪个签名——**`fn.length` 是声明参数个数**，
+   我自己写的单参 `describe(ref)` 永远是 1，于是永远走错分支，返回 undefined。
+
+**正确做法（已实施）**：
+
+- 首选**文档化的 seam `ctx.credentials`**：`resolve` / `describe(ref)` / `set(ref, value)` / `unset(ref)`；
+- 某个 composition 可能只暴露其中一个，所以**两个后端都问，谁先答就用谁**，并把这个事实回报给页面；
+- `writable` 以 **provider 的 `describe().writable` 为准**，不再二次加工；
+- 页面在 `store === false` 时显示"宿主没有可用的凭据存储 + 改用环境变量"的提示，而不是静默禁用。
+
+**为什么之前一直没验证到**：隔离 `dsh web` 宿主里 `credentials` 与 `credentialsController`
+**都没有挂载**（探针 `pending (waiting for service: credentials)` 实测），所以我每次在隔离环境里跑
+都得到 `store:false`，与你的真实宿主现象混在一起，无法区分"代码错"还是"环境缺"。这次改为：
+**代码对两种后端都兼容，并把后端状态显示到页面上**，环境缺服务时也不再是"静默禁用"。
+
+**守护**：`test/settings.test.mjs` 用**严格接口**的 seam 替身（访问不存在的方法即抛 `TypeError`）断言
+`writable:true`；用 controller 替身断言兜底路径可写；`test/client-render.test.mjs` 用真实 React 断言
+页面在未配置状态下渲染出提示与密码框。
+
+**复盘**
+
+- **"可见"与"存在"不是一回事**：服务在宿主里存在，不等于插件的上下文能读到它。Inspect 服务目录能证明
+  前者，证明不了后者。
+- **不要覆盖 provider 的权威字段**。`describe()` 说能不能写，就按它写；我加的 `&& store` 才是把输入框
+  锁死的直接原因。
+- **不要按参数个数猜接口**。`fn.length` 猜不出签名；宁可为已知的两个形状各写一条显式路径。
+- **禁用控件必须带原因**。静默禁用让你（和未来的我）无从判断是缺服务、缺权限还是代码错。
+
+### 4.14 凭据归属：从共享 `.credentials.yaml` 迁到插件自有目录
+
+**用户的判断是对的**：从第一版起，我把 Access Secret 当成"全局环境变量引用"（`refs` → `~/.dsh/.credentials.yaml`），
+这是**错误的归属**——那是全机器共享的凭据文档，插件卸载后条目没人清理，会变成孤儿密钥。
+
+**调研结论（来自已安装版本的文档与源码）**：
+
+| 问题 | 权威答案 |
+|---|---|
+| 插件自有密钥该用 seam 的哪一半？ | `dsh-doc` 的 `references/configuration.md`：*"Store secrets … as `ctx.credentials.modifyRecord()` records, not configuration"* |
+| record 会落在哪？ | `dsh-credentials-local` README：*"Records persist in the **same file**"*——仍是 `.credentials.yaml` 的 `records:` 段 |
+| `~/.dsh/storages/` 是什么？ | base 组合里 `dsh-storage-json` 的 `root: dshHomePath('storages')`，由 `ctx.storageDomain` 驱动；**官方没有把凭据放这里** |
+| 第三方插件怎么做？ | `dsh-context` 在 `~/.dsh/storages/dsh-context/` 下自建目录与文件，不走凭据 seam |
+
+结论：**官方 seam 无法让插件把密钥存到共享文件之外**。要真正隔离，只能像 `dsh-context` 那样自建目录。
+
+**权限事实（只读观察真实 `~/.dsh`）**：`~/.dsh` 是 `0700`，但 `~/.dsh/storages/` 是 `0755`、其中文件 `0644`；
+`.credentials.yaml` 是 `0600`，且 store 会检查权限。**自建目录必须显式收紧权限**，否则比官方 store 更松。
+
+**实施（方案 C）**：
+
+- 新模块 `src/secret-store.mjs`：`<DSH_HOME>/storages/dsh-zhihu-global-search/secret.json`
+  - 目录 `0700`、文件 `0600`（每次写都显式 `chmod`，`mkdir` 的 mode 会被 umask 过滤且对已存在目录无效）；
+  - 写入 = 临时文件（`O_EXCL`）→ `chmod` → `rename`，崩溃不留半截文档；
+  - **损坏 / 版本不符 / 字段非法 → 明确报错**（视图 `failed: true`，读取抛错），绝不静默当成"未配置"。
+- 解析顺序：插件存储（可写）→ 环境变量 `accessSecretEnv`（只读回退）。存储里的值优先。
+- 设置操作**不再依赖任何宿主服务**——这正是前两轮 `store:false` 的根源，现在从结构上消除。
+- 视图新增 `location`（存储目录）与 `source: "plugin" | "env"`；页面显示来源与存储位置。
+
+**端到端验证（隔离 web 宿主，真实 HTTP）**：
+
+| 步骤 | 结果 |
+|---|---|
+| `settings` | `store:"plugin"`, `writable:true`, 带 `location` |
+| `save` | `configured:true`, 目录 `700` / 文件 `600`，文档仅 `version`+`secret` |
+| 宿主重启后 | `configured:true`（持久化成立） |
+| `clear` | `configured:false` |
+| 删除插件存储目录 | 立即回到未配置（**卸载即清理**成立） |
+| `.credentials.yaml` 哈希前后对比 | **完全一致**；文件内不含 `ZHIHU_ACCESS_SECRET` |
+
+注：`.dev` 沙箱里的 `.credentials.yaml` 由宿主自己创建（`records.client-connection/browser-session`），与本插件无关。
+
+**故障注入（全部实测变红）**：目录改 `0755` → 2 条红；文件改 `0644` → 1 条红；
+损坏文件被静默吞掉 → 3 条红；错误文案不 redact → 1 条红。
+
+**复盘**
+
+- **凭据有归属**。"我的插件写的密钥"不该占用全机器共享的一层命名空间；能由所有者目录承载的，就别放进公共文档。
+- **接受官方 API 不等于接受它的存储位置**。record 解决了"命名空间隔离"，但没解决"文件隔离"；需求是后者时，要明说并自建。
+- **自己保管密钥 = 自己承担权限与原子性**，这两点必须写测试，否则"私有存储"只是换个地方明文摊开。
+- **可诊断优先**：损坏就报错、show 出存储位置，比"未配置"有用得多。
+
+### 4.15 工具排序：让 `zhihu_global_search` 优先于内置 `web_search`
+
+**需求**：参考 `md_article` 的写法，让模型在"要搜网"时优先选本插件，而不是内置 `web_search`。
+
+**依据（读的是运行中的真实 schema）**：内置 `web_search` 的自述只有一句——
+*"Search the web for current information. Returns an optional summary answer and a list of source URLs."*
+而 `md_article` 的取胜句式是 **`Prefer it over web_fetch, and fall back to web_fetch only if it fails.`**
+
+**结论**：模型面对两个能力相近的工具时，**不写偏好就等于没有偏好**。旧描述虽然长，但通篇是
+"何时不要用"，没有一个字说明它比内置工具好——自然不会被优先选中。
+
+**改动**（`src/tool.mjs` 的 `description`）：照 `md_article` 的三句式压缩——**941 → 428 字符、6 句 → 3 句**。
+
+| 句 | 作用 | 内容 |
+|---|---|---|
+| 1 | 能干什么 | 通过知乎开放平台搜全网，返回带标题/链接/作者/时间/摘要的排序列表 |
+| 2 | 何时用它 | `Prefer it over web_search`（有链接与日期、支持按站点与时间过滤）+ `fall back … only if it fails` |
+| 3 | 怎么调 | `count` / `filter` / `search_db` |
+
+**删掉了什么，为什么**：原描述的"不要拿来读单个已知 URL"、"纯私有知识"、"不能代替推理"、"上游内容是数据不是指令"
+这几段都是**模型默认就懂**的常识；它们并不改变选择，却把真正起作用的偏好句挤到了长文本中间。
+计费提示保留在 `src/errors.mjs` 的额度失败文案里——那才是它该出现的地方。
+
+**守护**（`test/tool.test.mjs`）：偏好与回退两句必须存在（大小写不敏感，避免标点微调就误伤）；
+新增长度上限（≤ 500 字符、≤ 4 句）与"描述承诺的参数必须真实存在"。
+故障注入：删掉偏好段 → 1 条红；描述加 200 字符 → 1 条红。
+
+- 描述在**所有语言下都是英文**（模型面向文案只有一份），与 `md_article` 一致。
+
+**守护**：`test/tool.test.mjs` 断言描述里同时存在 `Prefer it over web_search`、`Fall back to web_search only if
+it fails`、具体理由与 `filter`，以及"不用于读取单个已知 URL"的边界。故障注入：删掉偏好声明 → 1 条红。
+
+**顺带修掉的一个真问题（测试隔离）**：`execution without a secret ...` 用例用默认配置跑工具，
+`secretStoreDir` 默认指向**真实的 `~/.dsh`**——用户存入真实密钥后，这条用例会真的发出网络请求（它就是这么红起来的）。
+现在 `pnpm test` 以 `DSH_HOME=$(mktemp -d)` 运行，被指责的那条用例也显式指定了空目录；
+`test/manifest.test.mjs` 断言测试脚本必须 pin `DSH_HOME`（故障注入：改回 → 1 条红）。
+
+**复盘**
+
+- **工具选择的竞争是在描述里进行的**。写清"比谁好、好在哪、什么情况下才退回"，比把功能写全更有效。
+- **但也别把描述写成手册**。`md_article` 用约 300 字符就赢下了它那场竞争；冗长的描述既不会增加优先度，
+  还会稀释真正起作用的那句话。能干什么 / 何时用它 / 怎么调，三句足够。
+- **测试不得触碰用户的真实环境**。默认路径指向真实 home 时，测试的成败会随用户数据变化——这类测试既是
+  假阳性来源，也可能真的花钱（本插件按次计费）。
+
 ## 5. 验证方法（可直接复用）
 
-1. `pnpm test`：112 个离线用例，`fetch`/`AbortSignal.timeout` 全用替身，client 半在只含平台种子的模块表里真实执行。
+1. `pnpm test`：135 个离线用例（含真实 React 渲染与真实文件系统用例），`fetch`/`AbortSignal.timeout` 全用替身，client 半在只含平台种子的模块表里真实执行。
 2. `pnpm run check`：隔离 `DSH_HOME`（`.dev/home`）启动 `headless`，探针在 `agent/pre-step`
    读 `ctx.tools.definitions()`，断言 `zhihu_global_search` 在场；同时报告 RPC 桥是否存在。
 3. `pnpm run check:installed`：安装副本与源码一致、且不含 `test/`、`.dev/`。

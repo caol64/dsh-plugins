@@ -99,15 +99,17 @@ export async function handleSettingsRequest({ operations, onWarn }, request) {
 
 /**
  * Create the request handler for one plugin instance.
- * @param {{ ctx: object, ref: string }} options - host context and bound reference.
+ *
+ * The operations run entirely against THIS plugin's own store, so the route
+ * needs no host service beyond a logger. Earlier versions routed through
+ * `ctx.credentials` / `credentialsController` and were therefore at the mercy of
+ * which rows a composition mounted and when — the source of the "no credential
+ * store" reports in §4.13 and §4.14.
+ * @param {{ ctx: object, store?: object, ref: string }} options - route context, the plugin's store, and the env fallback name.
  * @returns {(request: Request) => Promise<Response>} the handler.
  */
-export function createSettingsRoute({ ctx, ref }) {
-    const operations = createSettingsOperations({
-        controller: optional(ctx, "credentialsController"),
-        ref,
-        logger: optional(ctx, "logger"),
-    });
+export function createSettingsRoute({ ctx, store, ref }) {
+    const operations = createSettingsOperations({ store, ref, logger: optional(ctx, "logger") });
     const onWarn = (message) => optional(ctx, "logger")?.warn?.("zhihu-global-search: %s", message);
     return (request) => handleSettingsRequest({ operations, onWarn }, request);
 }
@@ -119,6 +121,17 @@ export function createSettingsRoute({ ctx, ref }) {
  * @returns {unknown} the service, or undefined.
  */
 function optional(ctx, key) {
+    // `ctx.get(key)` is the ONLY read that works for a service this plugin did
+    // not inject: property access (`ctx[key]`) throws "cannot get property
+    // without inject" on the real Cordis context. Reading with `ctx[key]` made
+    // every optional lookup return undefined, so the settings route reported
+    // "no credential store" while the store was mounted (§4.14).
+    try {
+        const viaGet = ctx.get?.(key);
+        if (viaGet !== undefined) return viaGet;
+    } catch {
+        /* fall through to the property form for hosts without `get` */
+    }
     try {
         return ctx[key];
     } catch {

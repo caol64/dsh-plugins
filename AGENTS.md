@@ -93,9 +93,44 @@
   - 与 Host 通信走 **exact Fetch 路由**：Host 用 `ctx.inject(["connection"], …)` + `connection.fetch.register({ path: "/api/<包名>/<动作>", methods: ["POST"], requestBody: "buffered", fetch })`，
     Client 用同源 `fetch`。路径必须满足 `/api/<seg>/<seg>` 且段匹配 `[A-Za-z0-9_$.-]+`，否则注册被拒且静默消失。
   - `dsh.client.external` 只调整加载顺序与图边，**不会**提供不存在的模块。
-  - **验证方式**：把 `client.js` 放进"只会解析上述种子、未命中就抛同文错误"的假 `require` 里**真实执行 factory**；
-    只检查 `__DSH_BOOT__` 有条目或静态文件能取到，**证明不了** client 能加载。完整复盘见
-    `dsh-zhihu-global-search/docs/DEVELOPMENT-LOG.md` 4.10。
+  - **验证方式**：把 `client.js` 放进"只会解析上述种子、未命中就抛同文错误"的假 `require` 里**真实执行 factory**，
+    并**渲染一次注册的组件**、断言可见文本；只检查 `__DSH_BOOT__` 有条目、静态文件能取到，或"注册了一个 slot"，
+    都**证明不了** client 能用。完整复盘见 `dsh-zhihu-global-search/docs/DEVELOPMENT-LOG.md` 4.10–4.12。
+- **注册 React 组件：注册项的返回值必须是"元素树"，渲染证明必须用真实 React。**
+  - 槽位系统对组件抛错**静默吞掉**（控制台 `slot entry crashed`，DOM 里只剩 `<div data-slot-error>`），
+    页面表现为**空白且没有任何文字**。
+  - 🚫 最常见的空白原因：注册项写成 **`() => (ownerProps) => Page(...)`**，`Component()` 返回的是**函数**。
+    React 不执行它，只会打印 `Functions are not valid as a React child`，渲染结果为空——
+    而组件里的 try/catch 根本没机会执行，所以也看不到任何自写提示。
+  - ✅ 需要 `apply()` 的 `ctx` 时，闭包后**返回元素**：`(ownerProps) => Page(ownerProps, ctx)`。
+  - **服务替换要说真形状**：`locale` 是 `getSnapshot()/subscribe()/register()`，没有 `getLocale()`。
+    替身照着自己写错的代码造，就永远测不出错。
+  - ✅ **渲染证明用真实 `react` + `react-dom/server`**（仅 devDependencies）：`renderToStaticMarkup(Entry(props))`，
+    断言标题/输入框/按钮文本，并断言 `Entry(props)` 的返回值不是函数。手写 hook 替身比 React 宽松
+    （它会"渲染"任何函数），只能证明加载与注册，不能证明页面能显示。
+  - 再给页面包一层 try/catch 渲染器，让以后的失败显示原因而不是留白。
+- **凭据有归属：插件自有密钥存自己的目录，不占共享凭据文档。**
+  - `~/.dsh/.credentials.yaml` 是**全机器共享**的文档；`refs` 是全局限定的环境变量名空间，插件卸载后无人清理。
+  - 官方 seam 的 `record`（`<owner>/<id>`）解决"命名空间隔离"，但 `dsh-credentials-local` 的 README 明说
+    **records 存在同一个文件里**——要"文件级隔离 + 卸载即清理"，只能自建目录：
+    `<DSH_HOME>/storages/<包名>/`（`dsh-context` 就是这么做的）。
+  - 自建存储必须自己承担：目录 `0700`、文件 `0600`（**每次写显式 chmod**，`mkdir` 的 mode 受 umask 影响
+    且对已存在目录无效）、写入走"临时文件 + rename"、**损坏/版本不符一律报错**而不是当成"未配置"。
+  - 环境变量（`accessSecretEnv`）保留为**只读回退**，存储值优先。
+  - 可写性不要依赖宿主服务是否可见（`credentialsController` 是浏览器门面，插件上下文可能读不到；
+    `ctx[key]` 对未注入服务会抛，必须用 `ctx.get(key)`）。设置操作最好**不依赖任何宿主服务**。
+  - 控件被禁用时**必须在界面上写出原因**（缺存储 / 来源是环境变量 / 读取失败），并显示存储位置。
+  完整复盘见 `dsh-zhihu-global-search/docs/DEVELOPMENT-LOG.md` 4.13、4.14。
+- **工具描述是与内置工具竞争的地方：不写偏好就没有偏好。**
+  - 内置 `web_search` 的自述只有一句 "Search the web for current information…"；能力相近时，模型**不会**因为
+    你的描述更长就选你。要照 `md_article` 的句式写明：返回什么 → **`Prefer it over <内置工具>` 并给出具体理由**
+    → **`Fall back to <内置工具> only if it fails`** → 边界与成本。
+  - 用测试守护这三段文案，否则一次"精简描述"就会把优先度悄悄丢掉。
+  - **但保持精简**：`md_article` 约 300 字符就赢下竞争。能干什么 / 何时用它 / 怎么调，三句足够；
+    冗余的边界与常识说明会稀释真正起作用的偏好句。给描述加一个长度上限并用测试守住。
+  - 模型的工具选择只看描述；`presentationMeta`、README、locale 展示名都不参与。
+- **测试必须与用户的真实环境隔离**。凡是默认路径指向 `<DSH_HOME>` / 用户 home 的模块，测试要么显式传入临时目录，
+  要么整个测试脚本 pin 一个临时 `DSH_HOME`——否则测试结果会随用户数据变化（假阳性），甚至真的产生副作用/费用。
 - **`cordis.patch.yml` 只写 `id` + `name`**，不要把整份 `config` 内联进去：用户覆盖是**替换**语义而非深合并，内联默认值会把用户的局部覆盖变成整块丢失。
 - **`dsh <app>` 等价于 `--profile <app>`**：应用名就是 profile 名，`--profile` 只能出现一次；`--patch` 是启动器参数，需要显式 `--profile`。
 - **`file:` 安装是拷贝**，且 pnpm 按版本号缓存：源码改了但版本号不变时，`pnpm add`/`pnpm install` 可能复用旧拷贝。刷新前先 `rm -rf <profile>/node_modules/<pkg>`。

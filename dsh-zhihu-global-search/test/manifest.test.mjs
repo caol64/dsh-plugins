@@ -23,9 +23,20 @@ const RUNTIME_FILES = [
     "src/respond.mjs",
     "src/result.mjs",
     "src/search.mjs",
+    "src/secret-store.mjs",
     "src/settings.mjs",
     "src/tool.mjs",
 ];
+
+test("the test script never reads the developer's real DSH_HOME", () => {
+    // `resolveConfig()` defaults `secretStoreDir` to `<DSH_HOME>/storages/...`.
+    // A test that applies the plugin without overriding it would read the real
+    // store — and, with a real secret present, hit the network. Pin DSH_HOME to
+    // a throwaway directory for the whole run so that mistake cannot recur.
+    const script = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).scripts.test;
+    assert.match(script, /DSH_HOME=/u, "the test script must pin DSH_HOME to an isolated directory");
+    assert.match(script, /mktemp|tmpdir|\.tmp/u, "the pinned DSH_HOME must be a temporary directory");
+});
 
 test("the manifest identifies a bundle with a patch and a web client half", () => {
     assert.equal(manifest.name, "dsh-zhihu-global-search");
