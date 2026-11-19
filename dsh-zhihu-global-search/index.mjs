@@ -14,8 +14,8 @@
  *    reaches the next search without a restart;
  *  - no failure message, log line, or result carries the secret.
  *
- * The settings page (`./client`) drives three operations over the package RPC —
- * `settings`, `save`, `clear` — bound in {@link apply} to the host-owned
+ * The settings page (`./client`) drives three operations — `settings`, `save`,
+ * `clear` — over one exact Fetch route bound in {@link apply} to the host-owned
  * reference name; the browser never names a credential and never reads a value.
  *
  * @module dsh-zhihu-global-search
@@ -23,7 +23,7 @@
 import { assertNoLiteralSecret, createSecretResolver, DEFAULT_SECRET_REF, isCredentialRefName } from "./src/credentials.mjs";
 import { ArgumentError, normalizeBaseURL } from "./src/endpoint.mjs";
 import { SearchFailure, searchGlobal } from "./src/search.mjs";
-import { createSettingsOperations } from "./src/settings.mjs";
+import { createSettingsRoute, SETTINGS_ROUTE } from "./src/settings-route.mjs";
 import {
     maxCharsOf,
     OUTPUT_SCHEMA,
@@ -115,69 +115,46 @@ function callView(text, args) {
 }
 
 /**
- * Methods the settings page may call over the package RPC.
+ * Mount the settings route on the connection carrier.
  *
- * The Host pre-binds them to its own `accessSecretEnv`: `settings` takes no
- * arguments and the two writes take a bare string, so a request can neither
- * name another plugin's credential reference nor read a stored value back.
- */
-const RPC_METHODS = Object.freeze(["settings", "save", "clear"]);
-
-/**
- * Build the argument-free handlers over one settings-operations instance.
- * @param {ReturnType<typeof createSettingsOperations>} operations - bound operations.
- * @returns {Record<string, () => Promise<object>>} handlers.
- */
-export function rpcHandlers(operations) {
-    return {
-        settings: () => operations.settings(),
-        save: (value) => operations.save({ value }),
-        clear: () => operations.clear(),
-    };
-}
-
-/**
- * Mount the settings handlers on whichever package-RPC bridge this context
- * exposes.
+ * `ctx.inject(["connection"], …)` delays the callback until a web carrier exists
+ * and unloads it when that carrier goes away, so a headless host keeps the
+ * plugin loaded with no route and no failure. `connection` is therefore NOT in
+ * the plugin's `inject`: a missing web carrier must not stop the search tool.
  *
- * The bridge is host infrastructure outside this plugin's required services, so
- * it is discovered defensively among the documented shapes (`method(name, fn)`
- * or `register(table)`); a host that offers none simply has no settings page.
+ * This replaced an earlier attempt to discover a "package RPC bridge" by
+ * probing context keys (`remote`, `rpc`, `hostRpc`, `packageRpc`). None of them
+ * exists on this host, and the browser half's `require("host")` did not exist
+ * either — the settings page never mounted. The exact Fetch route below is the
+ * supported bridge for a static `dsh.client` bundle (see `docs/DEVELOPMENT-LOG.md`
+ * §4.10).
  * @param {object} ctx - plugin context.
  * @param {string} ref - host-owned credential reference.
- * @returns {boolean} whether a handler was mounted.
+ * @returns {void}
  */
-export function mountSettingsRpc(ctx, ref) {
-    const operations = createSettingsOperations({
-        controller: optional(ctx, "credentialsController"),
-        ref,
-        logger: optional(ctx, "logger"),
+export function mountSettingsRoute(ctx, ref) {
+    // A host that exposes no `inject` at all (a minimal test host, an older
+    // runtime) simply has no carrier to mount on. Reading it through the guarded
+    // accessor keeps a "cannot get without inject" host from failing activation.
+    const cordisCtx = /** @type {{ inject?: Function } | undefined} */ (optional(ctx, "inject") === undefined
+        ? undefined
+        : ctx);
+    if (typeof cordisCtx?.inject !== "function") return;
+    cordisCtx.inject(["connection"], (inner) => {
+        // A refused route means the settings page cannot work at all, so this is
+        // NOT swallowed: failing activation is more honest than looking loaded
+        // while every request 404s.
+        const dispose = inner.connection.fetch.register({
+            path: SETTINGS_ROUTE,
+            methods: ["POST"],
+            requestBody: "buffered",
+            fetch: createSettingsRoute({ ctx: inner, ref }),
+        });
+        if (typeof dispose === "function") optional(ctx, "effect")?.(() => () => {
+            void dispose();
+        });
+        optional(inner, "logger")?.info?.("%s: settings route mounted at %s", name, SETTINGS_ROUTE);
     });
-    const handlers = rpcHandlers(operations);
-    let mounted = false;
-    for (const key of ["remote", "rpc", "hostRpc", "packageRpc"]) {
-        const service = optional(ctx, key);
-        if (!service || typeof service !== "object") continue;
-        try {
-            if (typeof service.register === "function") {
-                const dispose = service.register(handlers);
-                if (typeof dispose === "function") optional(ctx, "effect")?.(() => dispose);
-                mounted = true;
-            } else if (typeof service.method === "function") {
-                for (const method of RPC_METHODS) service.method(method, handlers[method]);
-                mounted = true;
-            }
-        } catch (error) {
-            optional(ctx, "logger")?.warn?.("%s: RPC bridge %s refused the registration: %s", name, key, error.message);
-        }
-    }
-    if (!mounted) {
-        optional(ctx, "logger")?.info?.(
-            "%s: no package RPC bridge on this host; the settings page stays unavailable.",
-            name,
-        );
-    }
-    return mounted;
 }
 
 /**
@@ -253,5 +230,5 @@ export async function apply(ctx, rawConfig = {}) {
         if (typeof registered === "function") registered();
     });
 
-    mountSettingsRpc(ctx, config.accessSecretEnv);
+    mountSettingsRoute(ctx, config.accessSecretEnv);
 }

@@ -13,7 +13,8 @@ registerHooks({
     },
 });
 
-const { apply, DEFAULTS, inject, name, resolveConfig, mountSettingsRpc } = await import("../index.mjs");
+const { apply, DEFAULTS, inject, mountSettingsRoute, name, resolveConfig } = await import("../index.mjs");
+const { SETTINGS_ROUTE } = await import("../src/settings-route.mjs");
 
 /**
  * Minimal stand-in for a Cordis context that reproduces the real activation
@@ -27,8 +28,8 @@ function fakeContext(options = {}) {
         i18n: { locale: "zh-CN" },
         ...options.services,
     };
-    const record = { tools: [], registered: [], warnings: [], infos: [], effects: [] };
-    const target = {
+    const record = { tools: [], registered: [], warnings: [], infos: [], effects: [], injectedDeps: [], pendingDeps: [] };
+    const base = {
         logger: {
             info: (...args) => record.infos.push(args.join(" ")),
             warn: (...args) => record.warnings.push(args.join(" ")),
@@ -38,21 +39,42 @@ function fakeContext(options = {}) {
             record.effects.push(dispose);
             return () => (typeof dispose === "function" ? dispose() : undefined);
         },
-    };
-    const ctx = new Proxy(target, {
-        get(object, property) {
-            if (property in object) return object[property];
-            if (typeof property !== "string") return undefined;
-            if (services[property] !== undefined && (services[property] !== undefined || injected.has(property))) {
-                return services[property];
+        /**
+         * Cordis `ctx.inject(deps, cb)`: waits for every dep, then runs the
+         * callback with a child that reads exactly those deps. An absent dep
+         * leaves the callback pending, which is the behavior under test.
+         */
+        inject: (deps, callback) => {
+            record.injectedDeps.push([...deps]);
+            if (!deps.every((key) => services[key] !== undefined)) {
+                record.pendingDeps.push([...deps]);
+                return undefined;
             }
-            throw new Error(`cannot get property "${property}" without inject`);
+            return callback(makeContext({ ...base, ...Object.fromEntries(deps.map((key) => [key, services[key]])) }, new Set([...injected, ...deps])));
         },
-        has(object, property) {
-            return property in object || services[property] !== undefined;
-        },
-    });
-    return { ctx, record };
+    };
+    return { ctx: makeContext(base, injected), record };
+
+    /**
+     * @param {object} own - properties that exist on this context.
+     * @param {Set<string>} visible - service names readable as plain properties.
+     */
+    function makeContext(own, visible) {
+        return new Proxy(own, {
+            get(object, property) {
+                if (property in object) return object[property];
+                if (typeof property !== "string") return undefined;
+                // `ctx.get(name)`: the guarded lookup, answers for any mounted service.
+                if (property === "get") return (key) => services[key];
+                // Plain property access needs an injection, like Cordis.
+                if (visible.has(property)) return services[property];
+                throw new Error(`cannot get property "${property}" without inject`);
+            },
+            has(object, property) {
+                return property in object || visible.has(property);
+            },
+        });
+    }
 }
 
 test("inject lists only the required service", () => {
@@ -137,6 +159,9 @@ test("execution without a secret reports the settings page and never calls the n
 test("a configured secret from the credential service reaches the request", async () => {
     const calls = [];
     const { ctx, record } = fakeContext({
+        // The plugin reads `credentials` through the optional guard on its OWN
+        // context, so it must be injected here (as the real profile does).
+        inject: ["tools", "credentials"],
         services: {
             credentials: {
                 resolve: async (ref) => (ref === "ZHIHU_ACCESS_SECRET" ? { value: "s3cret", source: "credentials" } : undefined),
@@ -171,7 +196,7 @@ test("presentCall and presentResult never throw and never leak a payload", async
     assert.deepEqual(tool.presentCall({ query: "知乎 搜索" }), {
         card: "generic",
         kind: "search",
-        title: "知乎全网搜索 · 知乎 搜索",
+        title: "Zhihu global search · 知乎 搜索",
     });
     assert.doesNotThrow(() => tool.presentCall(undefined));
     assert.equal(tool.presentResult({}, { isError: false }), undefined);
@@ -192,42 +217,66 @@ test("unloading the plugin disposes the tool registration", async () => {
     assert.equal(DEFAULTS.accessSecretEnv, "ZHIHU_ACCESS_SECRET");
 });
 
-test("mountSettingsRpc pre-binds the reference name and tolerates a missing bridge", async () => {
+test("the settings route is mounted on the connection carrier with the bound reference", async () => {
     const calls = [];
     const controller = {
         describe: async (refs) => ({ [refs[0]]: { configured: false, writable: true } }),
         set: async (ref, value) => calls.push(["set", ref, value]),
         unset: async (ref) => calls.push(["unset", ref]),
     };
-    const { ctx } = fakeContext({ services: { credentialsController: controller } });
-    assert.equal(mountSettingsRpc(ctx, "ZHIHU_ACCESS_SECRET"), false);
-
-    const handlers = {};
-    const withBridge = fakeContext({
+    const routes = [];
+    const { ctx, record } = fakeContext({
+        // `credentialsController` is read from the PLUGIN context through the
+        // optional guard, so it must be visible there; `connection` only through
+        // ctx.inject.
+        inject: ["tools", "credentialsController"],
         services: {
             credentialsController: controller,
-            rpc: {
-                method(methodName, fn) {
-                    handlers[methodName] = fn;
+            connection: {
+                fetch: {
+                    register: (route) => {
+                        routes.push(route);
+                        return async () => {};
+                    },
                 },
             },
         },
     });
-    assert.equal(mountSettingsRpc(withBridge.ctx, "ZHIHU_ACCESS_SECRET"), true);
-    assert.deepEqual(Object.keys(handlers).sort(), ["clear", "save", "settings"]);
-    // Every handler is argument-free except the write, which takes a bare value:
-    // a browser request cannot name another plugin's reference.
-    assert.equal(handlers.settings.length, 0);
-    assert.equal(handlers.save.length, 1);
+    await apply(ctx, {});
 
-    assert.deepEqual(await handlers.settings(), {
-        ref: "ZHIHU_ACCESS_SECRET",
-        configured: false,
-        writable: true,
-        store: true,
-    });
-    await handlers.save("value-1");
+    // `connection` is requested through ctx.inject, never listed in `inject`.
+    assert.deepEqual(record.injectedDeps, [["connection"]]);
+    assert.equal(inject.includes("connection"), false);
+    assert.equal(routes.length, 1);
+    assert.equal(routes[0].path, SETTINGS_ROUTE);
+    assert.deepEqual(routes[0].methods, ["POST"]);
+    assert.equal(routes[0].requestBody, "buffered");
+
+    const response = await routes[0].fetch(new Request("http://127.0.0.1/api/dsh-zhihu-global-search/settings", {
+        method: "POST",
+        body: JSON.stringify({ op: "save", value: "value-1" }),
+    }));
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).ok, true);
+    // The request never names a reference: the config's bound one wins.
     assert.deepEqual(calls[0], ["set", "ZHIHU_ACCESS_SECRET", "value-1"]);
-    await handlers.clear();
-    assert.deepEqual(calls[1], ["unset", "ZHIHU_ACCESS_SECRET"]);
+});
+
+test("a host without a connection carrier keeps the tool working", async () => {
+    const { ctx, record } = fakeContext();
+    await apply(ctx, {});
+    assert.equal(record.tools.length, 1);
+    assert.deepEqual(record.injectedDeps, [["connection"]]);
+    assert.equal(record.warnings.length, 0);
+});
+
+test("mountSettingsRoute pre-binds a custom reference and is a no-op without a carrier", () => {
+    const routes = [];
+    const { ctx } = fakeContext({
+        services: {
+            connection: { fetch: { register: (route) => (routes.push(route), async () => {}) } },
+        },
+    });
+    mountSettingsRoute(ctx, "ZHIHU_TEAM_SECRET");
+    assert.equal(routes.length, 1);
 });

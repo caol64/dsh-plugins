@@ -79,6 +79,23 @@
       }
     ' @deepseek-ai/dsh-tools
     ```
+- **`dsh.client` 的 Client 半只能 `require` 平台种子，否则 `web boot` 直接报错**。
+  浏览器模块表（rc.5 实测，宿主在 `window.__ModuleLoader__.create({ staticModules })` 注入）只有 11 个名字：
+  `react`、`react/jsx-runtime`、`react-dom`、`react-dom/client`、`@deepseek-ai/cordis`、`zod`、
+  `@tanstack/react-virtual`、`@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、
+  `@deepseek-ai/dsh-client-ui-primitives`、`@deepseek-ai/dsh-client-ui-dockkit`。
+  `require` 的解析顺序是"种子 → 已物化模块 → 已注册的 package factory"，都没有就抛
+  `client-modules: require("x") missed the module table`，该条目 import 失败；`immediately: true` 的条目
+  会让整个 `web boot` 报 `entries did not activate`。
+  - ❌ `require("host")` —— 只存在于**动态插件沙箱**（`cordis_run` 代码的闭包）。
+  - ❌ `require("locale")` —— `locale` 是 **Client 服务**（`ctx.locale`）：写进 `inject: ["slots", "locale"]`，再用 `ctx.locale`。
+  - ❌ `require("styles")` —— 不存在：自己插入 `<style>`（宿主会给 factory 期间插入的样式打 `data-plugin`，条目卸载/替换时移除）。
+  - 与 Host 通信走 **exact Fetch 路由**：Host 用 `ctx.inject(["connection"], …)` + `connection.fetch.register({ path: "/api/<包名>/<动作>", methods: ["POST"], requestBody: "buffered", fetch })`，
+    Client 用同源 `fetch`。路径必须满足 `/api/<seg>/<seg>` 且段匹配 `[A-Za-z0-9_$.-]+`，否则注册被拒且静默消失。
+  - `dsh.client.external` 只调整加载顺序与图边，**不会**提供不存在的模块。
+  - **验证方式**：把 `client.js` 放进"只会解析上述种子、未命中就抛同文错误"的假 `require` 里**真实执行 factory**；
+    只检查 `__DSH_BOOT__` 有条目或静态文件能取到，**证明不了** client 能加载。完整复盘见
+    `dsh-zhihu-global-search/docs/DEVELOPMENT-LOG.md` 4.10。
 - **`cordis.patch.yml` 只写 `id` + `name`**，不要把整份 `config` 内联进去：用户覆盖是**替换**语义而非深合并，内联默认值会把用户的局部覆盖变成整块丢失。
 - **`dsh <app>` 等价于 `--profile <app>`**：应用名就是 profile 名，`--profile` 只能出现一次；`--patch` 是启动器参数，需要显式 `--profile`。
 - **`file:` 安装是拷贝**，且 pnpm 按版本号缓存：源码改了但版本号不变时，`pnpm add`/`pnpm install` 可能复用旧拷贝。刷新前先 `rm -rf <profile>/node_modules/<pkg>`。
@@ -122,7 +139,7 @@ exec bash "$PLUGIN_DIR/../scripts/dev.sh" "$PLUGIN_DIR" "${args[@]}"
 |---|---|---|
 | `name` | profile 里的依赖名、安装副本路径、`dev:dump` 的行匹配 | 必填 |
 | `dsh.tools`（数组或对象） | `check` 在真实宿主里断言这些工具已注册 | 不声明时只验证插件激活 |
-| `dsh.client` | 是否汇报包 RPC 桥（设置页能否挂载） | 不汇报 |
+| `dsh.client` | 提示该插件带 Client 半（其 Host 路由只在 web 载体挂载） | 不提示 |
 
 新增插件时：写一个薄壳、在 `package.json` 声明 `dsh.tools`（注册了原生工具就必须声明），**不要**再复制一份完整脚本——复制出的副本已经漂移过一次（见 `docs/DEVELOPMENT-LOG.md` 的 4.9）。
 
@@ -139,7 +156,6 @@ exec bash "$PLUGIN_DIR/../scripts/dev.sh" "$PLUGIN_DIR" "${args[@]}"
 |---|---|---|
 | `omni-article-markdown-plugin/` | 把墨探 `mdcli` 封装成 `md_article` 原生工具 | 见 `omni-article-markdown-plugin/AGENTS.md` |
 | `dsh-zhihu-global-search/` | 知乎开放平台全网搜索 → `zhihu_global_search` 工具 + 设置页录入 Access Secret（凭据存储） | 见 `dsh-zhihu-global-search/AGENTS.md` |
-| `dsh-session-delete/` | 侧栏会话菜单最下面的「删除会话」：停回合 → 删日志目录 / 投影缓存 → 清记账 → `api-session/removed` 刷新列表（Host 路由 + Client 菜单项，无原生工具） | 见 `dsh-session-delete/AGENTS.md` |
 | `scripts/` | 仓库级共享自测脚本（`dev.sh`），被每个插件的薄壳调用 | — |
 
 新增插件时，请在上表登记，并在插件目录内提供自己的 `AGENTS.md`（写项目独有的目录结构、脚本入口、领域约束），通用规则不要复制过去。

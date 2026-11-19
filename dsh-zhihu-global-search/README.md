@@ -13,6 +13,7 @@ description: "A DeepSeek Harness plugin that exposes the Zhihu Open Platform glo
 - 一个工具，一次搜索，返回结构化结果（标题 / 链接 / 摘要 / 作者 / 时间 + 上游原始对象），失败一律翻译成"下一步该做什么"。
 - 参数：`query`（必填）、`count`（1–20，越界钳制）、`filter`（上游过滤表达式，原样透传）、`search_db`（`all`/`realtime`/`static`）、`max_chars`（渲染文本预算）。
 - 设置页：密码输入框 + 保存 / 移除，状态只显示"是否已配置、来源、是否可写"，**任何接口都不返回值**。
+- 浏览器与宿主之间只有一条 exact Fetch 路由（`POST /api/dsh-zhihu-global-search/settings`），Client 半只依赖平台种子模块，不会因模块表缺失导致 `web boot` 失败。
 - 零运行时依赖；Host 半与 Client 半都在同一个包里。
 
 ## 安装

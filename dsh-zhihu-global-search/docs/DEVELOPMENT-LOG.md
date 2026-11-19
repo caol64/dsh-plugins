@@ -181,6 +181,10 @@ banner 之后——基座层和 web 层里也有名字匹配不到的 banner。�
 块级遮蔽让 `ctx.effect`（`apply` 作用域）里的 `locale.register` 指向了**状态值字符串**。
 改正为 `localeId`/`setLocaleId`，并给 `apply`/`label` 里的读取补了 `?? "zh-CN"` 兜底。
 
+**后续（见 4.10）**：这个 bug 追根到底是因为把 locale 当成了模块。现在 `locale` 是服务
+（`ctx.locale`），状态变量叫 `localeId`，两者不可能再混淆；`test/client.test.mjs` 的"标签随 locale 变化"
+用例守护它。
+
 ### 4.8 自测自身的两处假象（留给后来者）
 
 - `pnpm run check` 的探针只有在真实宿主跑一次模型步时才会打印；`web` 应用不跑模型步，
@@ -204,9 +208,87 @@ banner 之后——基座层和 web 层里也有名字匹配不到的 banner。�
 三个假阳性细节（`pnpm` 追加脚本名、探针两条分支共用一个子串匹配、`TOOL`/`TOOLS` 双变量）记在
 [omni 的 4.9](../../dsh-omni-article-markdown/docs/DEVELOPMENT-LOG.md)。
 
+### 4.10 线上真实故障：`web boot` 报 `require("host") missed the module table`
+
+**现象**（用户在真实浏览器里看到的原始日志，保持原样）：
+
+```
+Failed to load plugins
+dsh-session-delete
+dsh-zhihu-global-search
+web boot: 2 entries did not activate
+dsh-zhihu-global-search: import failed: client-modules: require("host") missed the module table
+```
+
+> 日志里的 `dsh-session-delete` 是同批加载、犯同类错误的另一个插件（其 `require("locale")`）。该插件
+> 已废弃删除；此处保留原始日志作为事故记录。
+
+**根因**：`dsh.client` 静态 bundle 的模块表**只有平台种子**。对 0.2.2-rc.5 逐包核实，宿主在
+`window.__ModuleLoader__.create({ staticModules: … })` 里注入的表就是 11 个名字：
+
+```
+react, react/jsx-runtime, react-dom, react-dom/client, @deepseek-ai/cordis, zod,
+@tanstack/react-virtual, @deepseek-ai/dsh-client-store,
+@deepseek-ai/dsh-client-ui-slots, @deepseek-ai/dsh-client-ui-primitives, @deepseek-ai/dsh-client-ui-dockkit
+```
+
+`makeRequire` 的解析顺序是"种子 → 已物化模块 → 已注册的 package factory"，三者都没有就抛
+`missed the module table`。本插件的 client 半用了三个**不存在**的名字：
+
+| 写法 | 真实身份 | 正确做法 |
+|---|---|---|
+| `require("host")` | 只存在于**动态插件沙箱**（`cordis_run` 代码的闭包），静态 bundle 没有 | 走 Host 的 exact Fetch 路由（`POST /api/dsh-zhihu-global-search/settings`） |
+| `require("locale")` | Client Cordis **服务** `ctx.locale` | `inject: ["slots", "locale"]`，然后用 `ctx.locale` |
+| `require("styles")` | 不存在 | 自己 `document.createElement("style")` 插入；宿主会给它打 `data-plugin` 并在条目卸载/替换时移除 |
+
+`dsh.client.external` **不能**补救：它只影响加载顺序与图边，不会凭空提供模块。
+
+**为什么会写成这样，又为什么没被发现**：
+
+1. 我原先的"package RPC 桥发现"（探测 `remote`/`rpc`/`hostRpc`/`packageRpc` 键）在宿主上**一个都不存在**，
+   当时只记了一条 info 就继续；浏览器侧于是臆造了 `require("host")` 去配套——两个错误的猜测互相背书。
+2. 上一轮记录里的"Client 半落地证据"只证明了 `__DSH_BOOT__` 里有本插件条目、静态文件能取到，
+   **没有执行 factory**，而 import 失败发生在执行 factory 时。
+3. 单测里 `require("host")` 从未被调用，`manifest.test.mjs` 甚至把 `require("host")`、`require("locale")`、
+   `require("styles")` 写成了**必须存在**的断言——测试在保护错误。
+
+**修复**：
+
+- Host：`mountSettingsRoute()` 用 `ctx.inject(["connection"], …)` 注册
+  `connection.fetch.register({ path: "/api/dsh-zhihu-global-search/settings", methods: ["POST"], requestBody: "buffered" })`，
+  路由契约在 `src/settings-route.mjs`（`op: settings|save|clear`，引用名由 Host 预绑定）；
+  路由被拒 **不吞异常**（宁可激活失败，也不要"看起来加载了、每个请求都 404"）。
+- Client：只 `require("react")`；`ctx.locale` 服务；自插样式；`fetch` 调用上面的路由。
+
+**守护**（三种，缺一仍会重演）：
+
+1. `test/client.test.mjs`：把 `client.js` 放进**只会解析平台种子**的假模块表里真实执行 factory
+   （未命中就抛与浏览器同文的错误），断言注册成功、标签随 locale 变化；
+2. 同文件把 `require("host"|"locale"|"styles")` 逐个注入回去，断言 factory 以
+   `missed the module table` 失败——故障注入是验证的一部分，不是补充；
+3. `test/client.test.mjs` 的种子漂移守卫：从**已安装**的 `@deepseek-ai/dsh-web-frontend` 主包中解析
+   `staticModules` 表，与 `test/client-seeds.mjs` 的常量逐项比对；宿主升级换表时测试直接变红。
+
+**复盘：为什么会漏，以及以后怎么防**
+
+- **把"能取到文件"当成"能跑起来"**。`__DSH_BOOT__` 有条目、`/plugins/??…/client.js` 返回 200，只证明分发链路通；
+  必须**执行 factory** 才算验证。静态 bundle 的正确性 = 在真实模块表里跑通 factory。
+- **两个猜测互相背书**。Host 端与 Client 端对同一套桥做了两次独立猜测，结果一致就被当成了证据。
+  凡是没有在已安装包里找到实现的东西，不能写进代码，更不能两边各猜一次。
+- **测试可以保护错误**。上一轮我把错误的 `require` 名字写成了必须存在的断言。写断言前先问
+  "这条断言依据的是哪份实现"，没有依据的断言就是把 bug 焊死（已在 `manifest.test.mjs` 改成只允许平台种子）。
+- **故障注入要打在不同层面**。上一轮只注入了 `dsh.tools` 名字；这次要注入的是"模块表里有什么"，
+  所以必须有"只给平台种子"的假表。
+- **共享现象要共享结论**。用户是同一次启动里发现两个插件出错的；拿到其中一份修复后，应当先比较
+  "我们两边的 client 半是不是同一类错误"，而不是各自修。
+
+**真机验证**：隔离 `dsh web`（`--port 0 --no-open`）启动后，`__DSH_BOOT__` 仍含本插件条目，
+且用带浏览器会话的请求取 `plugins/??dsh-zhihu-global-search/client.js` 返回 200 与完整源码；
+factory 在种子表里的执行由单测覆盖。**未覆盖**：浏览器内的 React 渲染与真实点击保存（需要用户重启后确认）。
+
 ## 5. 验证方法（可直接复用）
 
-1. `pnpm test`：89 个离线用例，`fetch`/`AbortSignal.timeout` 全用替身。
+1. `pnpm test`：112 个离线用例，`fetch`/`AbortSignal.timeout` 全用替身，client 半在只含平台种子的模块表里真实执行。
 2. `pnpm run check`：隔离 `DSH_HOME`（`.dev/home`）启动 `headless`，探针在 `agent/pre-step`
    读 `ctx.tools.definitions()`，断言 `zhihu_global_search` 在场；同时报告 RPC 桥是否存在。
 3. `pnpm run check:installed`：安装副本与源码一致、且不含 `test/`、`.dev/`。

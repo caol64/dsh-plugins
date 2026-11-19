@@ -2,12 +2,25 @@
  * Browser half of dsh-zhihu-global-search: a settings page under
  * Settings → Zhihu global search whose only job is the Access Secret.
  *
- * Security properties (the reason this page exists at all):
- *  - the value crosses the package RPC exactly once, in the Host direction
- *    (`save`). The Host half validates it and calls
- *    `ctx.credentials.set(ref, value)`; every response — and therefore every
- *    piece of browser state and every DOM node — carries only
- *    `{ configured, source, writable }`;
+ * ## Why `fetch` and not a module or an RPC bridge
+ *
+ * A static `dsh.client` bundle receives only the platform SEED modules. In this
+ * release the table is exactly: `react`, `react/jsx-runtime`, `react-dom`,
+ * `react-dom/client`, `@deepseek-ai/cordis`, `zod`, `@tanstack/react-virtual`,
+ * `@deepseek-ai/dsh-client-store`, `@deepseek-ai/dsh-client-ui-slots`,
+ * `@deepseek-ai/dsh-client-ui-primitives`, `@deepseek-ai/dsh-client-ui-dockkit`.
+ * There is no `host`, no `styles` and no `locale` module: `locale` is a Client
+ * SERVICE (`ctx.locale`, declared in `inject`), and a same-origin `fetch` to
+ * the Host's exact route (`/api/dsh-zhihu-global-search/settings`) is the
+ * supported bridge. Requiring any of them throws `missed the module table` and
+ * the whole client half fails to activate (see `docs/DEVELOPMENT-LOG.md` §4.10).
+ *
+ * ## Security properties (the reason this page exists at all)
+ *
+ *  - the value crosses the route exactly once, in the Host direction (`save`).
+ *    The Host validates it and calls `ctx.credentials.set(ref, value)`; every
+ *    response — and therefore every piece of browser state and every DOM node —
+ *    carries only `{ configured, source, writable }`;
  *  - the input is a password field and is cleared as soon as the write settles;
  *  - the browser never names the credential reference: the Host owns
  *    `accessSecretEnv`, so the page cannot address another plugin's secret.
@@ -18,11 +31,13 @@ window.__ModuleLoader__.load({
         const React = require("react");
         const h = React.createElement;
         const { useState, useEffect, useRef } = React;
-        const host = require("host");
-        const locale = require("locale");
-        const styles = require("styles");
 
         const NS = "zhihu-global-search";
+        /**
+         * The Host's exact route, relative (no leading slash) so the request
+         * follows the page's own mount; the Host registers the absolute form.
+         */
+        const SETTINGS_URL = "api/dsh-zhihu-global-search/settings";
         const REF_PREVIEW = "ZHIHU_ACCESS_SECRET";
         const DOCS_URL = "https://developer.zhihu.com";
 
@@ -97,6 +112,43 @@ window.__ModuleLoader__.load({
             return String(source);
         }
 
+        /**
+         * Read the locale service the plugin declared in `inject`.
+         *
+         * `locale` is a Client Cordis SERVICE (`ctx.locale`), never a module: the
+         * browser module table carries only platform seeds, so requiring the
+         * locale as a module throws `missed the module table` and the whole
+         * client half fails to activate. A context without it (an older host)
+         * degrades to zh-CN.
+         * @param {object} ctx - client plugin context.
+         * @returns {object | undefined} the service when present.
+         */
+        function localeService(ctx) {
+            try {
+                const service = ctx.locale;
+                return typeof service?.getLocale === "function" ? service : undefined;
+            } catch {
+                return undefined;
+            }
+        }
+
+        /**
+         * Inject the page stylesheet. The host tags every `<style>` a factory adds
+         * with `data-plugin`, and removes them when that entry is unloaded or
+         * replaced, so this is the module-table-free way to own styles.
+         * @param {string} css - the stylesheet text.
+         * @returns {() => void} remover.
+         */
+        function insertStyles(css) {
+            if (typeof document === "undefined") return () => {};
+            const element = document.createElement("style");
+            element.textContent = css;
+            document.head.append(element);
+            return () => {
+                element.remove();
+            };
+        }
+
         /** The language pack for the active locale, falling back to zh-CN. */
         function pickText(locale) {
             const id = String(locale ?? "");
@@ -137,12 +189,32 @@ window.__ModuleLoader__.load({
 `;
 
         /**
-         * Read the host-side view through the package RPC.
-         * @returns {Promise<{ ref: string, configured: boolean, source?: string, writable: boolean }>}
+         * Call one settings operation on the Host.
+         *
+         * The response is the credential view and nothing else: there is no path
+         * by which a stored value could come back to the page.
+         * @param {"settings" | "clear" | "save"} op - the operation.
+         * @param {string} [value] - the Access Secret, for `save` only.
+         * @returns {Promise<{ ref: string, configured: boolean, source?: string, writable: boolean, store: boolean, failed?: boolean }>} the view.
          */
-        async function loadState() {
-            const view = await host.call("settings");
-            return view;
+        async function callSettings(op, value) {
+            const response = await fetch(SETTINGS_URL, {
+                method: "POST",
+                credentials: "same-origin",
+                cache: "no-store",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(op === "save" ? { op, value } : { op }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (response.ok !== true || payload?.ok !== true) {
+                throw new Error(payload?.message ?? `HTTP ${response.status}`);
+            }
+            return payload;
+        }
+
+        /** Read the current credential state. */
+        function loadState() {
+            return callSettings("settings");
         }
 
         /**
@@ -150,7 +222,7 @@ window.__ModuleLoader__.load({
          * input is uncontrolled state that is wiped after every write.
          */
         function ZhihuSearchSettings() {
-            const localeCtx = ctx.get("locale") ?? locale;
+            const localeCtx = localeService(ctx);
             const [localeId, setLocaleId] = useState(() => {
                 try {
                     return localeCtx?.getLocale?.().id ?? "zh-CN";
@@ -213,7 +285,7 @@ window.__ModuleLoader__.load({
                 try {
                     let next;
                     try {
-                        next = await host.call("save", { value });
+                        next = await callSettings("save", value);
                     } catch (error) {
                         // The host could not persist: show that, never the value.
                         throw new Error(messageOf(error));
@@ -236,7 +308,7 @@ window.__ModuleLoader__.load({
                 setBusy(true);
                 setNotice(null);
                 try {
-                    const next = await host.call("clear");
+                    const next = await callSettings("clear");
                     if (!alive.current) return;
                     setState({ status: "ready", ...next });
                     setDraft("");
@@ -336,7 +408,7 @@ window.__ModuleLoader__.load({
             );
         }
 
-        /** Human text for a thrown RPC error without leaking a payload. */
+        /** Human text for a thrown route error without leaking a payload. */
         function messageOf(error) {
             if (error && typeof error.message === "string" && error.message !== "") return error.message;
             return String(error);
@@ -346,12 +418,12 @@ window.__ModuleLoader__.load({
         const DICTS = { "zh-CN": TEXT["zh-CN"], en: TEXT.en };
 
         return {
-            inject: ["slots"],
+            inject: ["slots", "locale"],
             apply(ctx) {
-                ctx.effect(() => styles.insert(CSS));
+                ctx.effect(() => insertStyles(CSS));
                 // Visible text goes through the locale service; registering the
                 // dictionaries is what makes the page follow a language switch.
-                const localeCtx = ctx.get("locale") ?? locale;
+                const localeCtx = localeService(ctx);
                 if (localeCtx && typeof localeCtx.register === "function") {
                     ctx.effect(() => localeCtx.register(NS, DICTS));
                 }
@@ -363,7 +435,7 @@ window.__ModuleLoader__.load({
                             order: 25,
                             label: () => {
                                 try {
-                                    const localeCtx = ctx.get("locale") ?? locale;
+                                    const localeCtx = localeService(ctx);
                                     return pickText(localeCtx?.getLocale?.().id ?? "zh-CN").nav;
                                 } catch {
                                     return TEXT["zh-CN"].nav;

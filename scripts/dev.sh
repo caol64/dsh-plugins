@@ -264,14 +264,11 @@ cmd_check() {
     echo "PASS: $PLUGIN activates in a real isolated host (no tool declared in package.json)"
   fi
 
-  # The settings bridge is optional infrastructure; report whether this host
-  # exposes one, so a missing settings page is never mistaken for a bug.
+  # A Client half talks to its Host half through an exact Fetch route, which only
+  # exists once a web carrier is mounted. A headless host therefore has no route,
+  # and that is expected — say so instead of leaving it ambiguous.
   if [[ $HAS_CLIENT -eq 1 ]]; then
-    if grep -q 'no package RPC bridge on this host' "$log"; then
-      echo "NOTE: this host mounts no package RPC bridge; the settings page stays unavailable here"
-    else
-      echo "INFO: package RPC bridge present (settings page should mount on the web client)"
-    fi
+    echo "INFO: the client half ships with this plugin; its Host route mounts on a web carrier (web app), not on this headless host"
   fi
 
   if [[ $with_installed -eq 1 ]]; then

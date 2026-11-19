@@ -105,18 +105,25 @@ test("the host and client halves are syntactically valid JavaScript", () => {
 
 test("the client half registers a lazy factory under the package name", () => {
     const source = readFileSync(join(root, "client.js"), "utf8");
-    // Dynamic-client convention: the factory id is the package name and the
-    // module table provides React, the RPC bridge, styles and the context.
+    // Dynamic-client convention: the factory id is the package name; the module
+    // table provides only the platform seeds (react and friends), so every other
+    // capability comes from `ctx`/`ctx.locale` or a Host fetch route.
     assert.match(source, /window\.__ModuleLoader__\.load\(\{\s*id: "dsh-zhihu-global-search"/u);
-    for (const builtin of ['require("react")', 'require("host")', 'require("styles")', 'require("locale")']) {
-        assert.ok(source.includes(builtin), builtin);
-    }
+    // Only platform seeds may be required from a static bundle; `host`,
+    // `styles` and `locale` are not in the module table (see
+    // docs/DEVELOPMENT-LOG.md §4.10 and test/client.test.mjs).
+    assert.ok(source.includes('require("react")'));
+    // "Requires" means executed, never mentioned: the documentation in the same
+    // file names these modules on purpose to explain why they are unavailable.
+    const code = source.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/(^|[^:])\/\/[^\n]*/gu, "$1");
+    assert.equal(/\brequire\(\s*["'](host|styles|locale)["']\s*\)/u.test(code), false);
     assert.match(source, /"settings\.section"/u);
     // Visible text is routed through the locale service, not hard-coded JSX.
     assert.match(source, /localeCtx\.register\(NS, DICTS\)/u);
-    // The page must not import a Harness client package: those change without
-    // notice and an import failure blanks the slot entry.
-    assert.doesNotMatch(source, /@deepseek-ai\/dsh-client-/u);
+    // The page must not REQUIRE a Harness client package beyond the seeds: those
+    // change without notice and a failed load blanks the slot entry. Naming one
+    // in prose is fine; the seed list itself is documented there.
+    assert.doesNotMatch(code, /@deepseek-ai\/dsh-client-[\w-]+["']\s*\)/u);
     // Styles come from theme tokens; literal colors are allowed only as the
     // var() fallback that keeps an unknown-token host readable.
     const css = source.slice(source.indexOf("const CSS"), source.indexOf("const CSS") + 6000);
