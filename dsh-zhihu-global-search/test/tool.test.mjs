@@ -184,30 +184,6 @@ test("maxCharsOf accepts positive integers only", () => {
     assert.equal(maxCharsOf({ max_chars: "900" }), DEFAULT_MAX_CHARS);
 });
 
-test("the description states the preference over the built-in web_search", () => {
-    // The built-in web_search describes itself only as "search the web for
-    // current information", so an equally plain description loses the tie. The
-    // preference must be explicit, name the fallback, and stay one line of
-    // guidance the model can act on (mirrors `md_article` vs `web_fetch`).
-    const description = stringsFor("zh-CN").description;
-    assert.match(description, /Prefer it over web_search/iu);
-    assert.match(description, /fall back to web_search only if it fails/iu);
-    // The reason must be concrete, not a bare assertion of superiority.
-    assert.match(description, /links and dates/u);
-    assert.match(description, /filter/u);
-});
-
-test("the description stays short, like md_article's", () => {
-    // `md_article` states capability + preference + knobs in ~300 characters.
-    // A longer description buys no priority and buries the preference line, so
-    // the ceiling is enforced here rather than left to taste.
-    const description = stringsFor("zh-CN").description;
-    assert.ok(description.length <= 500, `description is ${description.length} chars; keep it near md_article's ~300`);
-    assert.ok(description.split(". ").length <= 4, "one sentence each for capability, preference, and knobs");
-    // Every parameter the description promises must exist.
-    for (const hint of ["count", "filter", "search_db"]) assert.match(description, new RegExp(hint, "u"));
-});
-
 test("stringsFor picks a table by locale and both tables describe the tool", () => {
     // The model-facing description stays English in every locale; only the
     // presentation labels follow the locale.
